@@ -38,7 +38,7 @@ import { newId, nowIso } from '../lib/id'
 import { firebaseAuth, firestoreDb } from '../lib/firebase'
 import { writeAudit } from './audit'
 import { readSettings } from './settings'
-import { ensureSubFolders, loadSharedConnection } from './driveShared'
+import { ensureSubFolders, loadOfficeConnection } from './driveShared'
 
 export const OFFICES_COLLECTION = 'offices'
 
@@ -518,7 +518,8 @@ export function createOffice(input: OfficeInput, actor: { email?: string; orgId?
 async function makeFoldersFor(office: Office): Promise<void> {
   if (!office.id) return
   try {
-    const connection = await loadSharedConnection(office.orgId)
+    // PHASE 54: this office's OWN connection, so its folders go into its own Google account.
+    const connection = await loadOfficeConnection(office.orgId, office.id)
     if (!connection) return
     await ensureSubFolders({ id: office.id, orgId: office.orgId, name: office.name, prefix: office.prefix })
   } catch {

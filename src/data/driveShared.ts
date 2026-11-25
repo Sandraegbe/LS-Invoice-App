@@ -209,6 +209,104 @@ export async function loadSharedConnection(orgId = ''): Promise<SharedConnection
   }
 }
 
+/* ------------------------------------------ one connection for each office (phase 54) */
+
+/**
+ * PHASE 54 — EVERY OFFICE HAS ITS OWN GOOGLE ACCOUNT.
+ *
+ * The record lives in driveConnections/{officeId}: the document's id is the office's ID, never its
+ * name, so renaming an office changes nothing and can never make a second set of folders. Five
+ * fields and no more — orgId, officeId, email, rootFolderId, connectedAt — plus updatedAt, which
+ * Firestore writes itself. The key itself never leaves the Worker.
+ *
+ * The older business-wide record (driveConnections/subAccounts) stays exactly where it is: the
+ * cards in "All offices" and in "No office yet" keep reading it as they always have, and nothing
+ * below ever reads or writes it. One office's email can never reach another office, because each
+ * office reads one document — its own.
+ */
+export interface OfficeConnection {
+  orgId: string
+  officeId: string
+  email: string
+  rootFolderId: string
+  connectedAt: string
+  updatedAt?: string
+}
+
+/** The office connections this device has already read, so a card paints without a wait. */
+const officeConnections = new Map<string, OfficeConnection>()
+
+export function rememberedOfficeConnection(officeId: string): OfficeConnection | null {
+  return officeConnections.get(officeId) ?? null
+}
+
+/** One office's connection, from Firestore first, then from what this device already read. */
+export async function loadOfficeConnection(orgId: string, officeId: string): Promise<OfficeConnection | null> {
+  if (!officeId) return null
+  const remembered = rememberedOfficeConnection(officeId)
+  const db = await firestoreDb()
+  if (!db) return remembered
+  try {
+    const { doc, getDoc } = await import('firebase/firestore')
+    const found = await getDoc(doc(db, CONNECTION_COLLECTION, officeId))
+    if (!found.exists()) {
+      officeConnections.delete(officeId)
+      return null
+    }
+    const data = found.data() as Record<string, unknown>
+    const connection: OfficeConnection = {
+      orgId: String(data.orgId ?? ''),
+      officeId: String(data.officeId ?? officeId),
+      email: String(data.email ?? ''),
+      rootFolderId: String(data.rootFolderId ?? ''),
+      connectedAt: String(data.connectedAt ?? ''),
+      updatedAt: typeof data.updatedAt === 'string' ? data.updatedAt : '',
+    }
+    if (!connection.email || !connection.rootFolderId) return remembered
+    if (orgId && connection.orgId && connection.orgId !== orgId) return null
+    officeConnections.set(officeId, connection)
+    return connection
+  } catch {
+    // Offline, or the rules refused the read: what this device already read still stands.
+    return remembered
+  }
+}
+
+/** Write one office's connection. The document's id is the office's id; nothing else is touched. */
+export async function saveOfficeConnection(connection: OfficeConnection): Promise<void> {
+  if (!connection.officeId) return
+  officeConnections.set(connection.officeId, connection)
+  const db = await firestoreDb()
+  if (!db) return
+  const { doc, setDoc, serverTimestamp } = await import('firebase/firestore')
+  await setDoc(
+    doc(db, CONNECTION_COLLECTION, connection.officeId),
+    {
+      orgId: connection.orgId,
+      officeId: connection.officeId,
+      email: connection.email,
+      rootFolderId: connection.rootFolderId,
+      connectedAt: connection.connectedAt,
+      updatedAt: serverTimestamp(),
+    },
+    { merge: true },
+  )
+}
+
+/**
+ * Disconnect one office. Its own connection record is removed and this device forgets it; nothing
+ * in that Google account is deleted, its folders and files stay exactly as they are, and pressing
+ * Connect again finds the same folders rather than making new ones.
+ */
+export async function forgetOfficeConnection(officeId: string): Promise<void> {
+  if (!officeId) return
+  officeConnections.delete(officeId)
+  const db = await firestoreDb()
+  if (!db) return
+  const { doc, deleteDoc } = await import('firebase/firestore')
+  await deleteDoc(doc(db, CONNECTION_COLLECTION, officeId))
+}
+
 /** Write the connection record. Only an owner or an admin may; the rules refuse everyone else. */
 export async function saveSharedConnection(connection: SharedConnection): Promise<void> {
   writeCache({ ...readCache(), connection })
@@ -472,6 +570,97 @@ export async function disconnectSharedDrive(): Promise<void> {
   await forgetSharedConnection()
 }
 
+/* -------------------------------------- connecting one office's own Google account (phase 54) */
+
+/** What the Worker says about ONE office's key. It is asked with the office's id, never its name. */
+async function officeStatus(officeId: string): Promise<SharedStatus> {
+  const response = await callWorker(`/subaccounts/status?officeId=${encodeURIComponent(officeId)}`)
+  if (!response.ok) {
+    if (response.status === 409) return { connected: false, email: '', rootFolderId: '' }
+    throw await workerProblem(response, 'The key keeper did not answer.')
+  }
+  const answer = (await response.json()) as { connected?: boolean; email?: string; rootFolderId?: string }
+  return {
+    connected: answer.connected === true,
+    email: String(answer.email ?? ''),
+    rootFolderId: String(answer.rootFolderId ?? ''),
+  }
+}
+
+/**
+ * Connect ONE office to its own Google account. The office's id travels to the Worker, is kept in
+ * the consent window's state (so two offices can never swap an answer), and comes back with the
+ * address and the root folder. The key stays in the Worker; only these five fields are written.
+ */
+export async function connectOfficeDrive(orgId: string, officeId: string): Promise<OfficeConnection> {
+  if (!officeId) throw new SharedDriveError('Choose the office first: a Google account belongs to one office.', 'other')
+  if (typeof window === 'undefined') throw new SharedDriveError('Connecting needs the app open in a browser.', 'other')
+  if (!driveWorkerUrl) throw new SharedDriveError(NOT_SET_UP, 'unconfigured')
+  const popup = window.open('about:blank', `ls-invoice-office-drive-${officeId}`, 'width=520,height=720')
+  if (!popup) {
+    throw new SharedDriveError(
+      'This browser blocked the connect window. Allow windows for this site, then press Connect Google Drive again.',
+      'other',
+    )
+  }
+  try {
+    popup.location.replace(
+      `${driveWorkerUrl}/connect-subaccounts?officeId=${encodeURIComponent(officeId)}&t=${encodeURIComponent(await proofToken())}`,
+    )
+  } catch (cause) {
+    try {
+      popup.close()
+    } catch {
+      /* already gone */
+    }
+    throw cause
+  }
+  const deadline = Date.now() + WAIT_FOR_CONSENT_MS
+  while (Date.now() < deadline) {
+    await sleep(2500)
+    if (popup.closed) break
+    let status: SharedStatus
+    try {
+      status = await officeStatus(officeId)
+    } catch {
+      continue
+    }
+    if (status.connected && status.email && status.rootFolderId) {
+      try {
+        popup.close()
+      } catch {
+        /* already gone */
+      }
+      const connection: OfficeConnection = {
+        orgId,
+        officeId,
+        email: status.email,
+        rootFolderId: status.rootFolderId,
+        connectedAt: new Date().toISOString(),
+      }
+      await saveOfficeConnection(connection)
+      return connection
+    }
+  }
+  try {
+    popup.close()
+  } catch {
+    /* already gone */
+  }
+  throw new SharedDriveError(
+    'The Google sign-in did not finish. Nothing was changed — press Connect Google Drive to try again.',
+    'not-connected',
+  )
+}
+
+/** Disconnect ONE office: its own key is dropped, its own record is removed. Files stay put. */
+export async function disconnectOfficeDrive(officeId: string): Promise<void> {
+  if (!officeId) throw new SharedDriveError('Choose the office first: a Google account belongs to one office.', 'other')
+  const response = await callWorker(`/subaccounts/disconnect?officeId=${encodeURIComponent(officeId)}`, { method: 'POST' })
+  if (!response.ok) throw await workerProblem(response, 'The key keeper did not let go of the connection.')
+  await forgetOfficeConnection(officeId)
+}
+
 /* ---------------------------------------------------------------- the folders of one sub account */
 
 /**
@@ -600,9 +789,11 @@ export async function sharedReadiness(officeId: string, orgId = ''): Promise<Sha
   if (!driveWorkerUrl) {
     return { ready: false, reason: NOT_SET_UP }
   }
-  const connection = await loadSharedConnection(orgId)
+  // PHASE 54: the office's OWN connection is the one that decides. Another office's key can never
+  // send this office's records, and an office is never ready because a different one is connected.
+  const connection = await loadOfficeConnection(orgId, officeId)
   if (!connection) {
-    return { ready: false, reason: "Waiting for the sub accounts' Google Drive connection" }
+    return { ready: false, reason: "Waiting for this office's Google Drive connection" }
   }
   const folders = await loadSubFolders(officeId)
   if (!folders || !folders.root || SUB_FOLDER_KEYS.some((key) => !folders.folders[key])) {

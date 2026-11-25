@@ -38,6 +38,12 @@ interface DrivePanelProps {
   /** True for a person who may change the connection (the owner or an admin). */
   canManage: boolean
   /**
+   * PHASE 54: true for whoever may press Connect, Disconnect and Sync now. Inside an office that is
+   * the owner, an admin, and every sub user whose Google Drive section is on — one card, one set of
+   * buttons, whoever is signed in. In "All offices" it is exactly who it was before.
+   */
+  canSync?: boolean
+  /**
    * PHASE 24, ITEM 3: "Sync" and "Google Drive" are two separate sections an office may be given.
    * Either half can be left out; both default on, so the owner's own screen is unchanged.
    */
@@ -54,6 +60,7 @@ interface DrivePanelProps {
 export function DrivePanel({
   orgId = '',
   canManage,
+  canSync = canManage,
   showSync = true,
   showDrive = true,
   officeId = '',
@@ -81,7 +88,7 @@ export function DrivePanel({
   const invoices = Array.from(new Set(mine.filter((job) => job.status !== 'synced').map((job) => job.invoiceNo)))
 
   return (
-    <SharedDriveCard orgId={orgId} inside={inside} officeId={officeId} canManage={canManage}>
+    <SharedDriveCard orgId={orgId} inside={inside} officeId={officeId} canManage={canSync}>
       {showSync ? (
         canManage ? (
           <>

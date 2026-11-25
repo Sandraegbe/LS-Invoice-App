@@ -771,6 +771,38 @@ export async function reuploadFile(input: {
 }
 
 /**
+ * PHASE 54, "Sync now": one pass over THIS office's own queue, right now, and how many records it
+ * sent. Nothing is deleted and nothing is reset — a job that still cannot go keeps its place, its
+ * tries and its reason, and the card says so. Another office's queue is never touched.
+ */
+export interface SyncNowResult {
+  sent: number
+  waiting: number
+  reason: string
+}
+
+export async function syncNowForOffice(officeId: string): Promise<SyncNowResult> {
+  const mineNow = () => readQueue().filter((job) => officeIdOfJob(job) === officeId)
+  const sentBefore = mineNow().filter((job) => job.status === 'synced').length
+  const ready = await sharedReadiness(officeId)
+  if (!ready.ready) {
+    return { sent: 0, waiting: mineNow().filter((job) => job.status !== 'synced').length, reason: ready.reason }
+  }
+  for (const job of mineNow()) {
+    if (job.status === 'synced') continue
+    if (job.missing) continue
+    if (job.status === 'failed' && job.attempts >= MAX_AUTO_TRIES) continue
+    update(job.id, { status: 'pending', error: null, nextTryAt: new Date(Date.now() - 1000).toISOString() })
+  }
+  await runSync()
+  const after = mineNow()
+  const sent = Math.max(0, after.filter((job) => job.status === 'synced').length - sentBefore)
+  const left = after.filter((job) => job.status !== 'synced')
+  const reason = left.find((job) => job.error)?.error ?? (left.length ? 'Waiting for the next try.' : '')
+  return { sent, waiting: left.length, reason }
+}
+
+/**
  * A fresh token is in hand, so everything that was waiting for Google carries on by itself, from
  * exactly where it stopped: waiting jobs are put back at the front of the line.
  */

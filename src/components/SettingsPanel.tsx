@@ -545,13 +545,16 @@ export function SettingsPanel({ user, onServices, onOffices, onOwnership }: Sett
 
       {/* Phase 6, item 1: the honest state of every file the app still owes the Drive. Admin only;
           staff read the status. Phase 45: one card — the chip, Connect and Disconnect, and the sync
-          summary for whatever this screen is looking at. Inside one office it counts that office's
-          records alone and shows no email; in "All offices" it is the whole business and names the
-          connected Google account. */}
-      {canSeeSync || canSeeDrive ? (
+          summary for whatever this screen is looking at. PHASE 54: inside one office that card is
+          that office's own Google account — its email, its folders, Connect, Disconnect and Sync
+          now — and it is drawn only for a person whose Google Drive section is on, so a sub user
+          with it switched off never sees it. In "All offices" it is the whole business, exactly as
+          before. */}
+      {(inside ? canSeeDrive : canSeeSync || canSeeDrive) ? (
         <DrivePanel
           orgId={user.orgId}
           canManage={user.role === 'admin'}
+          canSync={inside ? canSeeDrive : user.role === 'admin'}
           showSync={canSeeSync}
           showDrive={canSeeDrive}
           officeId={viewedOffice}

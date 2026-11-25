@@ -710,36 +710,37 @@ service cloud.firestore {
     }
 
     // everything else is closed
-        // Drive folders of one sub account (ids only, never a key)
-    match /driveFolders/{officeId} {
+   // Drive folders of one sub account (ids only, never a key)
+        match /driveFolders/{officeId} {
       allow read: if signedIn() && sameOrg(resource.data.orgId)
         && sameOffice(resource.data.get('officeId', ''));
 
-      allow create, update: if isAdminHere()
+      allow create, update: if signedIn() && !isDisabled()
         && request.resource.data.orgId == currentUser().orgId
         && request.resource.data.officeId == officeId
+        && (isAdminHere()
+   || (officeId == myOffice() && officeId != ''
+        && get(/databases/$(database)/documents/offices/$(officeId)).data.get('sections', {}).get('drive', true) == true))
         && request.resource.data.root is string
         && request.resource.data.folders is map
-        && request.resource.data.keys().hasOnly(
-             ['orgId', 'officeId', 'name', 'root', 'folders', 'createdAt', 'updatedAt']);
+        && request.resource.data.keys().hasOnly(['orgId', 'officeId', 'name', 'root', 'folders', 'createdAt', 'updatedAt']);
 
       allow delete: if false;
     }
 
-    // The sub accounts' shared Google account: email and root folder id, never a key
-    match /driveConnections/{connectionId} {
-      allow read: if isAdminHere() && sameOrg(resource.data.orgId);
+        match /driveConnections/{connectionId} {
+      allow read: if signedIn() && sameOrg(resource.data.orgId);
 
-      allow create, update: if isAdminHere()
+      allow create, update: if signedIn() && !isDisabled()
         && request.resource.data.orgId == currentUser().orgId
+        && (isAdminHere()
+            || (connectionId == 'subAccounts' && myOffice() != ''
+                && get(/databases/$(database)/documents/offices/$(myOffice())).data.get('sections', {}).get('drive', true) == true))
         && request.resource.data.email is string
-        && request.resource.data.email.size() > 0
         && request.resource.data.rootFolderId is string
-        && request.resource.data.connectedAt is string
-        && request.resource.data.keys().hasOnly(
-             ['orgId', 'email', 'rootFolderId', 'connectedAt', 'updatedAt']);
+        && request.resource.data.keys().hasOnly(['orgId', 'email', 'rootFolderId', 'connectedAt', 'updatedAt']);
 
-      allow delete: if isAdminHere() && resource.data.orgId == currentUser().orgId;
+      allow delete: if isAdminHere() && sameOrg(resource.data.orgId);
     }
 
     // names-only list of sub accounts, so shipping can offer a destination
