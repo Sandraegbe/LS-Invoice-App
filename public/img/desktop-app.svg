@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="Desktop app">
+  <rect width="256" height="256" rx="26" fill="#8A6A1F"/>
+  <rect x="40" y="58" width="176" height="112" rx="8" fill="#ffffff"/>
+  <rect x="56" y="76" width="80" height="10" rx="5" fill="#C9BB92"/>
+  <rect x="56" y="98" width="140" height="10" rx="5" fill="#E8DFC9"/>
+  <rect x="56" y="118" width="112" height="10" rx="5" fill="#E8DFC9"/>
+  <rect x="56" y="138" width="60" height="14" rx="7" fill="#F5C518"/>
+  <rect x="96" y="182" width="64" height="10" rx="5" fill="#ffffff"/>
+  <rect x="72" y="200" width="112" height="12" rx="6" fill="#ffffff"/>
+</svg>

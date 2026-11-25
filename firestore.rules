@@ -1,0 +1,775 @@
+rules_version = '2';
+
+// LS Invoice rules: roles, sub accounts, invoices, shipments.
+// A person's role and permissions live on users/{uid}. A staff login reaches only its own
+// sub account (officeId). The owner and admins reach every sub account of the business.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function myEmail() {
+      return request.auth.token.email.lower();
+    }
+
+    // The one email that may become the Owner. Same string as OWNER_EMAIL in src/data/ownership.ts.
+    function ownerEmail() {
+      return 'leatherspaabujang@gmail.com';
+    }
+
+    function myEmailVerified() {
+      return request.auth.token.email_verified == true;
+    }
+
+    function ownerEmailSignedIn() {
+      return signedIn() && myEmail() == ownerEmail() && myEmailVerified();
+    }
+
+    function hasOwner() {
+      return exists(/databases/$(database)/documents/ownership/main);
+    }
+
+    function isOwner() {
+      return signedIn()
+        && hasOwner()
+        && get(/databases/$(database)/documents/ownership/main).data.ownerUid == request.auth.uid;
+    }
+
+    function currentUser() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isAdmin() {
+      return signedIn() && currentUser().role == 'admin';
+    }
+
+    function isDisabled() {
+      return signedIn() && currentUser().disabled == true;
+    }
+
+    function may(action) {
+      return signedIn() && !isDisabled() && currentUser().permissions[action] == true;
+    }
+
+    function sameOrg(orgId) {
+      return signedIn() && currentUser().orgId == orgId;
+    }
+
+    function isAdminHere() {
+      return isAdmin() && !isDisabled();
+    }
+
+    function myOffice() {
+      return currentUser().get('officeId', '');
+    }
+
+    // May this person see a record kept in that sub account?
+    function sameOffice(officeId) {
+      return isAdmin() || (officeId is string && officeId != '' && officeId == myOffice());
+    }
+
+    // May this person write a record into that sub account?
+    function writesInto(officeId) {
+      return isAdmin() || (officeId is string && officeId != '' && officeId == myOffice());
+    }
+
+    function sectionsOk(data) {
+      return data.get('sections', {}) is map
+        && data.get('sections', {}).keys().hasOnly([
+             'invoices', 'clients', 'assigned', 'pickup', 'demurrage', 'services', 'sync', 'drive',
+             'reports', 'admin', 'organization', 'subaccounts', 'admins', 'rebuild', 'numbering',
+             'firebase', 'install'])
+        && (data.get('sections', {}).get('invoices', true) is bool)
+        && (data.get('sections', {}).get('clients', true) is bool)
+        && (data.get('sections', {}).get('assigned', true) is bool)
+        && (data.get('sections', {}).get('pickup', true) is bool)
+        && (data.get('sections', {}).get('demurrage', true) is bool)
+        && (data.get('sections', {}).get('services', true) is bool)
+        && (data.get('sections', {}).get('sync', true) is bool)
+        && (data.get('sections', {}).get('drive', true) is bool)
+        && (data.get('sections', {}).get('reports', true) is bool)
+        && (data.get('sections', {}).get('admin', true) is bool)
+        && (data.get('sections', {}).get('organization', true) is bool)
+        && (data.get('sections', {}).get('subaccounts', true) is bool)
+        && (data.get('sections', {}).get('admins', true) is bool)
+        && (data.get('sections', {}).get('rebuild', true) is bool)
+        && (data.get('sections', {}).get('numbering', true) is bool)
+        && (data.get('sections', {}).get('firebase', true) is bool)
+        && (data.get('sections', {}).get('install', true) is bool);
+    }
+
+    function officeKept() {
+      return request.resource.data.get('officeId', '') == resource.data.get('officeId', '');
+    }
+
+    function officeMovedIn() {
+      return isAdminHere()
+        && resource.data.get('officeId', '') == ''
+        && request.resource.data.get('officeId', '') is string
+        && request.resource.data.get('officeId', '').size() > 0;
+    }
+
+    function managesStaff() {
+      return may('manageStaff');
+    }
+
+    function onlyPermissions(p) {
+      return p is map
+        && p.keys().hasOnly([
+             'createInvoices', 'managePayments', 'manageDemurrage',
+             'manageServices', 'uploadMedia', 'manageStaff'])
+        && p.keys().size() == 6;
+    }
+
+    // users
+    match /users/{uid} {
+      allow read: if signedIn() && (request.auth.uid == uid || (isAdmin() && sameOrg(resource.data.orgId)));
+
+      // The first Owner, only while no ownership document exists.
+      allow create: if signedIn()
+        && request.auth.uid == uid
+        && request.resource.data.uid == uid
+        && request.resource.data.email == ownerEmail()
+        && ownerEmailSignedIn()
+        && !hasOwner()
+        && request.resource.data.role == 'admin'
+        && request.resource.data.disabled == false
+        && request.resource.data.keys().hasOnly(
+             ['uid', 'name', 'email', 'role', 'permissions', 'orgId', 'officeId', 'disabled', 'createdAt', 'updatedAt'])
+        && request.resource.data.get('officeId', '') == ''
+        && request.resource.data.orgId is string
+        && request.resource.data.orgId.size() > 0;
+
+      // An invited person claims the invite on their first sign-in.
+      allow create: if signedIn()
+        && request.auth.uid == uid
+        && request.resource.data.uid == uid
+        && request.resource.data.email == myEmail()
+        && request.resource.data.role == 'staff'
+        && request.resource.data.disabled == false
+        && get(/databases/$(database)/documents/invites/$(myEmail())).data.status == 'pending'
+        && request.resource.data.get('officeId', '') == get(/databases/$(database)/documents/invites/$(myEmail())).data.get('officeId', '')
+        && request.resource.data.permissions == get(/databases/$(database)/documents/invites/$(myEmail())).data.permissions
+        && request.resource.data.orgId == get(/databases/$(database)/documents/invites/$(myEmail())).data.orgId
+        && request.resource.data.keys().hasOnly(
+             ['uid', 'name', 'email', 'role', 'permissions', 'orgId', 'officeId', 'disabled', 'createdAt', 'updatedAt']);
+
+      // You may change your own name and nothing else.
+      allow update: if signedIn()
+        && request.auth.uid == uid
+        && request.resource.data.role == resource.data.role
+        && request.resource.data.permissions == resource.data.permissions
+        && request.resource.data.orgId == resource.data.orgId
+        && request.resource.data.get('officeId', '') == resource.data.get('officeId', '')
+        && request.resource.data.disabled == resource.data.disabled
+        && request.resource.data.email == resource.data.email;
+
+      // The admin changes role, ticks or the disabled flag for someone else.
+      allow update: if managesStaff()
+        && request.auth.uid != uid
+        && resource.data.orgId == currentUser().orgId
+        && request.resource.data.orgId == resource.data.orgId
+        && request.resource.data.email == resource.data.email
+        && request.resource.data.role in ['admin', 'staff']
+        && (request.resource.data.role == resource.data.role || isOwner())
+        && request.resource.data.get('officeId', '') is string
+        && onlyPermissions(request.resource.data.permissions);
+
+      allow delete: if managesStaff()
+        && request.auth.uid != uid
+        && resource.data.orgId == currentUser().orgId
+        && (resource.data.role != 'admin' || isOwner());
+
+      // Unfinished work, private to the person.
+      match /drafts/{form} {
+        allow read, delete: if signedIn() && request.auth.uid == uid;
+
+        allow create, update: if signedIn()
+          && !isDisabled()
+          && request.auth.uid == uid
+          && request.resource.data.form is string
+          && form.size() > 0
+          && form.size() <= 400
+          && request.resource.data.form.size() > 0
+          && request.resource.data.form.size() <= 120
+          && request.resource.data.value != null
+          && request.resource.data.at is int
+          && request.resource.data.hadMedia is bool
+          && request.resource.data.email is string
+          && request.resource.data.updatedAt is string
+          && request.resource.data.keys().hasOnly(
+               ['form', 'value', 'at', 'hadMedia', 'email', 'updatedAt']);
+      }
+    }
+
+    // ownership
+    match /ownership/main {
+      allow read: if signedIn();
+
+      allow create: if ownerEmailSignedIn()
+        && !hasOwner()
+        && request.resource.data.ownerEmail == ownerEmail()
+        && request.resource.data.ownerUid == request.auth.uid
+        && request.resource.data.orgId is string
+        && request.resource.data.orgId.size() > 0;
+
+      allow update: if signedIn()
+        && !isDisabled()
+        && isOwner()
+        && request.resource.data.orgId == resource.data.orgId
+        && request.resource.data.ownerUid is string
+        && request.resource.data.ownerEmail is string
+        && exists(/databases/$(database)/documents/users/$(request.resource.data.ownerUid));
+
+      allow delete: if false;
+    }
+
+    // invites
+    match /invites/{email} {
+      allow read: if signedIn() && (email == myEmail() || (managesStaff() && sameOrg(resource.data.orgId)));
+
+      allow create: if managesStaff()
+        && request.resource.data.email == email
+        && request.resource.data.role == 'staff'
+        && request.resource.data.orgId == currentUser().orgId
+        && request.resource.data.status == 'pending'
+        && request.resource.data.disabled == false
+        && request.resource.data.get('officeId', '') is string
+        && onlyPermissions(request.resource.data.permissions);
+
+      allow update: if managesStaff()
+        && resource.data.orgId == currentUser().orgId
+        && request.resource.data.email == resource.data.email
+        && request.resource.data.orgId == resource.data.orgId
+        && request.resource.data.permissions is map
+        && request.resource.data.disabled is bool
+        && request.resource.data.get('officeId', '') is string
+        && request.resource.data.status in ['pending', 'accepted', 'revoked'];
+
+      allow update: if signedIn()
+        && email == myEmail()
+        && resource.data.status == 'pending'
+        && request.resource.data.status == 'accepted'
+        && request.resource.data.permissions == resource.data.permissions
+        && request.resource.data.orgId == resource.data.orgId
+        && request.resource.data.get('officeId', '') == resource.data.get('officeId', '')
+        && request.resource.data.disabled == resource.data.disabled;
+
+      allow delete: if managesStaff() && resource.data.orgId == currentUser().orgId;
+    }
+
+    // offices (sub accounts)
+    match /offices/{officeId} {
+      allow read: if signedIn() && sameOrg(resource.data.orgId);
+
+      allow create: if managesStaff()
+        && request.resource.data.orgId == currentUser().orgId
+        && request.resource.data.name is string
+        && request.resource.data.name.size() > 0
+        && request.resource.data.name.size() <= 80
+        && request.resource.data.active == true
+        && request.resource.data.get('prefix', '') is string
+        && request.resource.data.get('prefix', '').size() <= 4
+        && request.resource.data.get('nextNumber', 1) is int
+        && request.resource.data.get('nextNumber', 1) >= 1
+        && request.resource.data.get('counterYear', 0) is int
+        && request.resource.data.keys().hasOnly([
+             'name', 'prefix', 'nextNumber', 'counterYear', 'address', 'phones', 'email', 'website',
+             'bankName', 'bankAccountName', 'bankAccountNumber',
+             'active', 'createdAt', 'updatedAt', 'orgId', 'sections'])
+        && sectionsOk(request.resource.data);
+
+      allow update: if managesStaff()
+        && resource.data.orgId == currentUser().orgId
+        && request.resource.data.orgId == resource.data.orgId
+        && request.resource.data.name is string
+        && request.resource.data.name.size() > 0
+        && request.resource.data.active is bool
+        && request.resource.data.get('prefix', '') is string
+        && request.resource.data.get('prefix', '').size() <= 4
+        && request.resource.data.get('nextNumber', 1) is int
+        && request.resource.data.get('nextNumber', 1) >= 1
+        && request.resource.data.get('counterYear', 0) is int
+        && request.resource.data.keys().hasOnly([
+             'name', 'prefix', 'nextNumber', 'counterYear', 'address', 'phones', 'email', 'website',
+             'bankName', 'bankAccountName', 'bankAccountNumber',
+             'active', 'createdAt', 'updatedAt', 'orgId', 'sections'])
+        && sectionsOk(request.resource.data);
+
+      allow delete: if false;
+    }
+
+    // reusable names, per sub account
+    match /staffNames/{entry} {
+      allow read: if signedIn() && sameOrg(resource.data.orgId)
+        && sameOffice(resource.data.get('officeId', ''));
+
+      allow create: if signedIn()
+        && !isDisabled()
+        && request.resource.data.orgId == currentUser().orgId
+        && writesInto(request.resource.data.get('officeId', ''))
+        && request.resource.data.name is string
+        && request.resource.data.name.size() > 0
+        && request.resource.data.name.size() <= 120
+        && request.resource.data.at is int
+        && request.resource.data.keys().hasOnly(['name', 'orgId', 'officeId', 'at']);
+
+      allow update: if false;
+
+      allow delete: if managesStaff() && resource.data.orgId == currentUser().orgId;
+    }
+
+    // audit log: append only
+    match /auditLog/{entry} {
+      allow create: if signedIn()
+        && !isDisabled()
+        && request.resource.data.actorEmail == myEmail()
+        && request.resource.data.orgId == currentUser().orgId
+        && writesInto(request.resource.data.get('officeId', ''))
+        && request.resource.data.at is string
+        && request.resource.data.action is string
+        && request.resource.data.detail is string
+        && request.resource.data.keys().hasOnly(
+             ['at', 'actorEmail', 'actorUid', 'orgId', 'officeId', 'action', 'target', 'detail']);
+
+      allow read: if managesStaff() && sameOrg(resource.data.orgId)
+        && sameOffice(resource.data.get('officeId', ''));
+
+      allow update, delete: if false;
+    }
+
+    // each admin's own Reports layout
+    match /reportLayouts/{uid} {
+      allow read: if signedIn()
+        && request.auth.uid == uid
+        && resource.data.uid == uid
+        && resource.data.orgId == currentUser().orgId;
+
+      allow create, update: if managesStaff()
+        && !isDisabled()
+        && request.auth.uid == uid
+        && request.resource.data.uid == uid
+        && request.resource.data.orgId == currentUser().orgId
+        && request.resource.data.email is string
+        && request.resource.data.dashboards is map
+        && request.resource.data.updatedAt is string
+        && request.resource.data.keys().hasOnly(['uid', 'email', 'orgId', 'dashboards', 'updatedAt']);
+
+      allow delete: if false;
+    }
+
+    // the business's own letterhead
+    match /settings/{document} {
+      allow read: if signedIn() && sameOrg(resource.data.orgId);
+      allow create, update: if signedIn()
+        && !isDisabled()
+        && isAdminHere()
+        && request.resource.data.orgId == currentUser().orgId
+        && request.resource.data.keys().hasOnly([
+             'businessName', 'logoDataUrl', 'address', 'location', 'aboutText',
+             'phone', 'email', 'bankName', 'bankAccountName',
+             'bankAccountNumber', 'pleaseNote', 'invoicePrefix', 'demurrageGraceDays',
+             'demurrageFeeKobo', 'orgId', 'updatedAt', 'signatoryName', 'signatureDataUrl'])
+        && request.resource.data.get('signatureDataUrl', '') is string
+        && request.resource.data.get('signatureDataUrl', '').size() <= 300000
+        && request.resource.data.get('signatoryName', '') is string
+        && request.resource.data.demurrageGraceDays is int
+        && request.resource.data.demurrageFeeKobo is int;
+      allow delete: if false;
+    }
+    
+
+    // the Google Drive connection (no token is ever stored here)
+    match /settings/drive {
+      allow read: if signedIn() && sameOrg(resource.data.orgId);
+
+      allow create, update: if isAdmin()
+        && !isDisabled()
+        && request.resource.data.orgId == currentUser().orgId
+        && request.resource.data.email is string
+        && request.resource.data.email.size() > 0
+        && request.resource.data.email.size() <= 160
+        && request.resource.data.rootFolderId is string
+        && request.resource.data.folders is map
+        && request.resource.data.connectedAt is string
+        && request.resource.data.keys().hasOnly([
+             'email', 'rootFolderId', 'folders', 'connectedAt', 'orgId', 'updatedAt']);
+
+      allow delete: if isAdmin()
+        && !isDisabled()
+        && resource.data.orgId == currentUser().orgId;
+    }
+
+    // services
+    match /services/{serviceId} {
+      allow read: if signedIn() && sameOrg(resource.data.orgId)
+        && sameOffice(resource.data.get('officeId', ''));
+      allow create: if signedIn()
+        && !isDisabled()
+        && (managesStaff() || may('manageServices'))
+        && request.resource.data.orgId == currentUser().orgId
+        && writesInto(request.resource.data.get('officeId', ''))
+        && request.resource.data.name is string
+        && request.resource.data.name.size() > 0
+        && request.resource.data.defaultRateKobo is int
+        && request.resource.data.defaultRateKobo >= 0
+        && request.resource.data.active is bool;
+      allow update: if signedIn()
+        && !isDisabled()
+        && (managesStaff() || may('manageServices'))
+        && resource.data.orgId == currentUser().orgId
+        && sameOffice(resource.data.get('officeId', ''))
+        && (officeKept() || officeMovedIn())
+        && request.resource.data.orgId == resource.data.orgId;
+      allow delete: if signedIn()
+        && !isDisabled()
+        && (managesStaff() || may('manageServices'))
+        && resource.data.orgId == currentUser().orgId
+        && sameOffice(resource.data.get('officeId', ''));
+    }
+
+    // clients
+    match /clients/{clientId} {
+      allow read: if signedIn() && sameOrg(resource.data.orgId)
+        && sameOffice(resource.data.get('officeId', ''));
+      allow create: if signedIn()
+        && !isDisabled()
+        && may('createInvoices')
+        && request.resource.data.orgId == currentUser().orgId
+        && writesInto(request.resource.data.get('officeId', ''))
+        && request.resource.data.name is string
+        && request.resource.data.phone is string
+        && request.resource.data.createdBy == myEmail();
+      allow update: if signedIn()
+        && !isDisabled()
+        && resource.data.orgId == currentUser().orgId
+        && sameOffice(resource.data.get('officeId', ''))
+        && (may('createInvoices') || may('manageDemurrage'))
+        && (officeKept() || officeMovedIn())
+        && request.resource.data.orgId == resource.data.orgId
+        && request.resource.data.createdBy == resource.data.createdBy;
+      allow delete: if managesStaff() && resource.data.orgId == currentUser().orgId;
+    }
+
+    // invoices
+    match /invoices/{invoiceId} {
+      allow read: if signedIn() && sameOrg(resource.data.orgId)
+        && sameOffice(resource.data.get('officeId', ''));
+
+      allow create: if signedIn()
+        && !isDisabled()
+        && may('createInvoices')
+        && request.resource.data.orgId == currentUser().orgId
+        && writesInto(request.resource.data.get('officeId', ''))
+        && (isAdminHere() || request.resource.data.createdBy == myEmail())
+        && request.resource.data.number is string
+        && request.resource.data.number.size() > 0
+        && request.resource.data.lines is list
+        && request.resource.data.lines.size() > 0
+        && request.resource.data.snapshot is map
+        && request.resource.data.office is map
+        && request.resource.data.officeId is string
+        && request.resource.data.createdBy is string
+        && request.resource.data.payments is list
+        && (may('managePayments') || request.resource.data.payments.size() == 0);
+
+      // The raiser or an admin corrects an unsent invoice.
+      allow update: if signedIn()
+        && !isDisabled()
+        && resource.data.orgId == currentUser().orgId
+        && sameOffice(resource.data.get('officeId', ''))
+        && resource.data.get('sentAt', null) == null
+        && (resource.data.createdBy == myEmail() || managesStaff())
+        && request.resource.data.number == resource.data.number
+        && (officeKept() || officeMovedIn())
+        && request.resource.data.orgId == resource.data.orgId
+        && request.resource.data.createdBy == resource.data.createdBy
+        && request.resource.data.lines is list
+        && request.resource.data.lines.size() > 0;
+
+      // Whoever manages payments records a payment. Only the money moves.
+      allow update: if signedIn()
+        && !isDisabled()
+        && resource.data.orgId == currentUser().orgId
+        && sameOffice(resource.data.get('officeId', ''))
+        && may('managePayments')
+        && request.resource.data.number == resource.data.number
+        && request.resource.data.lines == resource.data.lines
+        && request.resource.data.get('officeId', '') == resource.data.get('officeId', '')
+        && request.resource.data.orgId == resource.data.orgId
+        && request.resource.data.createdBy == resource.data.createdBy
+        && request.resource.data.get('clientId', '') == resource.data.get('clientId', '')
+        && request.resource.data.get('clientName', '') == resource.data.get('clientName', '')
+        && request.resource.data.totalKobo == resource.data.totalKobo
+        && request.resource.data.payments is list
+        && request.resource.data.payments.size() >= resource.data.payments.size()
+        && request.resource.data.status in ['unpaid', 'part-paid', 'paid']
+        && request.resource.data.paidKobo is int
+        && request.resource.data.balanceKobo is int;
+
+      // A paid invoice may be marked sent (and only a paid one).
+      allow update: if signedIn()
+        && !isDisabled()
+        && resource.data.orgId == currentUser().orgId
+        && sameOffice(resource.data.get('officeId', ''))
+        && resource.data.get('sentAt', null) == null
+        && resource.data.status == 'paid'
+        && request.resource.data.sentAt is string
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['sentAt', 'updatedAt']);
+
+      // The workshop: assigned work, pickup signature, delivery note, pick-up date, line status.
+      allow update: if signedIn()
+        && !isDisabled()
+        && resource.data.orgId == currentUser().orgId
+        && sameOffice(resource.data.get('officeId', ''))
+        && !request.resource.data.diff(resource.data).affectedKeys()
+             .hasAny(['snapshot', 'office', 'sentAt', 'createdAt'])
+        && request.resource.data.number == resource.data.number
+        && request.resource.data.get('officeId', '') == resource.data.get('officeId', '')
+        && request.resource.data.orgId == resource.data.orgId
+        && request.resource.data.createdBy == resource.data.createdBy
+        && request.resource.data.get('clientId', '') == resource.data.get('clientId', '')
+        && request.resource.data.get('clientName', '') == resource.data.get('clientName', '')
+        && request.resource.data.totalKobo == resource.data.totalKobo
+        && request.resource.data.paidKobo == resource.data.paidKobo
+        && request.resource.data.balanceKobo == resource.data.balanceKobo
+        && request.resource.data.status == resource.data.status
+        && request.resource.data.payments == resource.data.payments
+        && request.resource.data.lines is list
+        && request.resource.data.lines.size() == resource.data.lines.size();
+
+      allow delete: if false;
+    }
+
+    // the invoice counter
+    match /counters/invoices {
+      allow read: if signedIn();
+      allow create: if signedIn()
+        && !isDisabled()
+        && request.resource.data.value == 1
+        && request.resource.data.keys().hasOnly(['value']);
+      allow update: if signedIn()
+        && !isDisabled()
+        && request.resource.data.value == resource.data.value + 1;
+      allow delete: if false;
+    }
+
+    // one counter per sub account
+    match /counters/{counterId} {
+      allow read: if signedIn();
+
+      allow create: if signedIn()
+        && !isDisabled()
+        && request.resource.data.value is int
+        && request.resource.data.value >= 1
+        && request.resource.data.year is int
+	&& writesInto(request.resource.data.get('officeId', ''))
+        && request.resource.data.get('officeId', '') is string
+        && request.resource.data.get('prefix', '') is string
+        && request.resource.data.get('prefix', '').size() <= 4
+        && request.resource.data.keys().hasOnly(['year', 'value', 'officeId', 'prefix', 'updatedAt']);
+
+      allow update: if signedIn()
+        && !isDisabled()
+        && request.resource.data.value is int
+        && request.resource.data.value >= resource.data.value
+	&& writesInto(resource.data.get('officeId', ''))
+        && request.resource.data.get('officeId', '') == resource.data.get('officeId', '')
+        && request.resource.data.get('prefix', '') is string
+        && request.resource.data.get('prefix', '').size() <= 4
+        && request.resource.data.keys().hasOnly(['year', 'value', 'officeId', 'prefix', 'updatedAt']);
+
+      allow delete: if false;
+    }
+
+    // the Test database record
+    match /databaseTests/{testId} {
+      allow read: if isAdminHere() && sameOrg(resource.data.orgId);
+
+      allow create: if isAdminHere()
+        && request.resource.data.orgId == currentUser().orgId
+        && request.resource.data.id is string
+        && request.resource.data.by is string
+        && request.resource.data.at is string
+        && request.resource.data.keys().hasOnly(['id', 'by', 'at', 'orgId']);
+
+      allow delete: if isAdminHere() && sameOrg(resource.data.orgId);
+    }
+
+    // shipments: an item away being worked on at another sub account
+    match /shipments/{shipmentId} {
+      function onShipment() {
+        return isAdminHere()
+          || sameOffice(resource.data.originOfficeId)
+          || sameOffice(resource.data.destinationOfficeId);
+      }
+
+      allow read: if signedIn() && sameOrg(resource.data.orgId) && onShipment();
+
+      // Opened by the origin, for a line of its own, into another sub account of the same business.
+      allow create: if signedIn()
+        && !isDisabled()
+        && request.resource.data.orgId == currentUser().orgId
+        && writesInto(request.resource.data.get('originOfficeId', ''))
+        && request.resource.data.destinationOfficeId is string
+        && request.resource.data.destinationOfficeId != request.resource.data.originOfficeId
+        && exists(/databases/$(database)/documents/offices/$(request.resource.data.destinationOfficeId))
+        && get(/databases/$(database)/documents/offices/$(request.resource.data.destinationOfficeId)).data.orgId == currentUser().orgId
+        && request.resource.data.status == 'shipped'
+        && request.resource.data.assignees is list
+        && request.resource.data.item is map
+        && request.resource.data.item.keys().hasOnly(
+             ['itemName', 'invoiceNo', 'dateOfTransaction', 'workToBeDone', 'service',
+              'serviceCategory', 'quantity'])
+        && request.resource.data.keys().hasOnly([
+             'id', 'shipmentId', 'orgId', 'invoiceId', 'lineId', 'invoiceNo', 'lineNo',
+             'originOfficeId', 'originOfficeName', 'destinationOfficeId', 'destinationOfficeName',
+             'item', 'status', 'assignees', 'shippedBy', 'shippedAt',
+             'workFinishedBy', 'workFinishedAt', 'shippedBackBy', 'shippedBackAt',
+             'receivedBy', 'receivedAt', 'createdBy', 'createdAt', 'updatedAt']);
+
+      // The destination changes its staff, Work finished and Shipped back, nothing else.
+      allow update: if signedIn()
+        && !isDisabled()
+        && sameOrg(resource.data.orgId)
+        && sameOffice(resource.data.destinationOfficeId)
+        && resource.data.status in ['shipped', 'work-finished']
+        && request.resource.data.status in ['shipped', 'work-finished', 'shipped-back']
+        && request.resource.data.assignees is list
+        && request.resource.data.originOfficeId == resource.data.originOfficeId
+        && request.resource.data.destinationOfficeId == resource.data.destinationOfficeId
+        && request.resource.data.invoiceId == resource.data.invoiceId
+        && request.resource.data.lineId == resource.data.lineId
+        && request.resource.data.invoiceNo == resource.data.invoiceNo
+        && request.resource.data.item.get('itemName', '') == resource.data.item.get('itemName', '')
+        && request.resource.data.item.get('invoiceNo', '') == resource.data.item.get('invoiceNo', '')
+        && request.resource.data.item.get('dateOfTransaction', '') == resource.data.item.get('dateOfTransaction', '')
+        && request.resource.data.item.get('workToBeDone', '') == resource.data.item.get('workToBeDone', '')
+        && request.resource.data.item.get('service', '') == resource.data.item.get('service', '')
+        && request.resource.data.item.get('serviceCategory', '') == resource.data.item.get('serviceCategory', '')
+        && request.resource.data.item.get('quantity', 0) == resource.data.item.get('quantity', 0)
+        && request.resource.data.get('shippedBy', null) == resource.data.get('shippedBy', null)
+        && request.resource.data.get('shippedAt', null) == resource.data.get('shippedAt', null)
+        && request.resource.data.get('receivedBy', null) == resource.data.get('receivedBy', null)
+        && request.resource.data.get('receivedAt', null) == resource.data.get('receivedAt', null)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(
+             ['assignees', 'status', 'workFinishedBy', 'workFinishedAt',
+              'shippedBackBy', 'shippedBackAt', 'updatedAt']);
+
+      // The origin writes one thing: Received, once the item is on its way back.
+      allow update: if signedIn()
+        && !isDisabled()
+        && sameOrg(resource.data.orgId)
+        && sameOffice(resource.data.originOfficeId)
+        && resource.data.status == 'shipped-back'
+        && request.resource.data.status == 'received'
+        && request.resource.data.receivedBy is string
+        && request.resource.data.receivedBy.size() > 0
+        && request.resource.data.receivedAt is string
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(
+             ['status', 'receivedBy', 'receivedAt', 'updatedAt']);
+
+      // Taking it back before anybody started work: the origin, while it is still only shipped.
+      allow delete: if signedIn()
+        && !isDisabled()
+        && sameOrg(resource.data.orgId)
+        && sameOffice(resource.data.originOfficeId)
+        && resource.data.status == 'shipped';
+    }
+
+    // shipping update records, one per press, under the origin office
+    match /shippingRecords/{recordId} {
+      function shipmentOf() {
+        return get(/databases/$(database)/documents/shipments/$(request.resource.data.shipmentId)).data;
+      }
+
+      allow read: if signedIn()
+        && sameOrg(resource.data.orgId)
+        && sameOffice(resource.data.get('officeId', ''));
+
+      allow create: if signedIn()
+        && !isDisabled()
+        && request.resource.data.orgId == currentUser().orgId
+        && request.resource.data.recordType == 'Shipping update'
+        && request.resource.data.event is string
+        && request.resource.data.event.size() > 0
+        && request.resource.data.shipmentId is string
+        && request.resource.data.at is string
+        && request.resource.data.createdAt is string
+        && (writesInto(request.resource.data.get('officeId', ''))
+            || (exists(/databases/$(database)/documents/shipments/$(request.resource.data.shipmentId))
+                && sameOffice(shipmentOf().destinationOfficeId)))
+        && request.resource.data.keys().hasOnly([
+             'id', 'orgId', 'officeId', 'shipmentId', 'invoiceNo', 'recordType', 'event',
+             'lineNo', 'itemName', 'fromOffice', 'toOffice', 'recordedBy', 'at', 'createdAt']);
+
+      allow update, delete: if false;
+    }
+
+    // everything else is closed
+        // Drive folders of one sub account (ids only, never a key)
+    match /driveFolders/{officeId} {
+      allow read: if signedIn() && sameOrg(resource.data.orgId)
+        && sameOffice(resource.data.get('officeId', ''));
+
+      allow create, update: if isAdminHere()
+        && request.resource.data.orgId == currentUser().orgId
+        && request.resource.data.officeId == officeId
+        && request.resource.data.root is string
+        && request.resource.data.folders is map
+        && request.resource.data.keys().hasOnly(
+             ['orgId', 'officeId', 'name', 'root', 'folders', 'createdAt', 'updatedAt']);
+
+      allow delete: if false;
+    }
+
+    // The sub accounts' shared Google account: email and root folder id, never a key
+    match /driveConnections/{connectionId} {
+      allow read: if isAdminHere() && sameOrg(resource.data.orgId);
+
+      allow create, update: if isAdminHere()
+        && request.resource.data.orgId == currentUser().orgId
+        && request.resource.data.email is string
+        && request.resource.data.email.size() > 0
+        && request.resource.data.rootFolderId is string
+        && request.resource.data.connectedAt is string
+        && request.resource.data.keys().hasOnly(
+             ['orgId', 'email', 'rootFolderId', 'connectedAt', 'updatedAt']);
+
+      allow delete: if isAdminHere() && resource.data.orgId == currentUser().orgId;
+    }
+
+    // names-only list of sub accounts, so shipping can offer a destination
+    match /officeDirectory/{officeId} {
+      allow read: if signedIn() && sameOrg(resource.data.orgId);
+
+      allow create: if managesStaff()
+        && request.resource.data.orgId == currentUser().orgId
+        && get(/databases/$(database)/documents/offices/$(officeId)).data.orgId == currentUser().orgId
+        && request.resource.data.name is string
+        && request.resource.data.name.size() > 0
+        && request.resource.data.name.size() <= 80
+        && request.resource.data.active is bool
+        && request.resource.data.keys().hasOnly(['name', 'active', 'orgId', 'updatedAt']);
+
+      allow update: if managesStaff()
+        && resource.data.orgId == currentUser().orgId
+        && request.resource.data.orgId == resource.data.orgId
+        && request.resource.data.name is string
+        && request.resource.data.name.size() > 0
+        && request.resource.data.name.size() <= 80
+        && request.resource.data.active is bool
+        && request.resource.data.keys().hasOnly(['name', 'active', 'orgId', 'updatedAt']);
+
+      allow delete: if false;
+    }
+
+    // everything else is closed
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

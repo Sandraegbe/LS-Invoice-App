@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 710 466" width="710" height="466" role="img" aria-label="Payments recorded against invoices">
+  <rect width="710" height="466" rx="12" fill="#FBF3DD"/>
+  <rect x="18" y="18" width="674" height="430" rx="8" fill="#ffffff"/>
+  <rect x="18" y="18" width="674" height="46" rx="8" fill="#FDF7E6"/>
+  <circle cx="44" cy="41" r="6" fill="#ff6b6b"/>
+  <circle cx="64" cy="41" r="6" fill="#F5C518"/>
+  <circle cx="84" cy="41" r="6" fill="#E4CF8E"/>
+  
+  <rect x="44" y="92" width="280" height="150" rx="12" fill="#8A6A1F"/>
+  <rect x="68" y="120" width="80" height="12" rx="6" fill="#FDF7E6"/>
+  <rect x="68" y="150" width="200" height="18" rx="9" fill="#ffffff"/>
+  <rect x="68" y="186" width="160" height="9" rx="4.5" fill="#9fc7f2"/><rect x="68" y="210" width="96" height="9" rx="4.5" fill="#9fc7f2"/>
+  <rect x="380" y="92" width="286" height="150" rx="12" fill="#FFFDF5" stroke="#F1E7CE"/>
+  <rect x="404" y="120" width="220" height="10" rx="5" fill="#D5C8A2"/><rect x="404" y="148" width="220" height="10" rx="5" fill="#D5C8A2"/><rect x="404" y="176" width="220" height="10" rx="5" fill="#D5C8A2"/><rect x="404" y="204" width="132" height="10" rx="5" fill="#D5C8A2"/>
+  <rect x="44" y="282" width="622" height="40" rx="8" fill="#FFFDF5" stroke="#F1E7CE"/><rect x="44" y="334" width="622" height="40" rx="8" fill="#ffffff" stroke="#F1E7CE"/><rect x="44" y="386" width="622" height="40" rx="8" fill="#FFFDF5" stroke="#F1E7CE"/>
+  <circle cx="70" cy="302" r="9" fill="#E4CF8E"/><circle cx="70" cy="354" r="9" fill="#E4CF8E"/><circle cx="70" cy="406" r="9" fill="#E4CF8E"/>
+  <rect x="96" y="296" width="200" height="10" rx="5" fill="#D5C8A2"/><rect x="96" y="348" width="200" height="10" rx="5" fill="#D5C8A2"/><rect x="96" y="400" width="200" height="10" rx="5" fill="#D5C8A2"/>
+  <rect x="540" y="296" width="100" height="10" rx="5" fill="#8A6A1F"/><rect x="540" y="348" width="100" height="10" rx="5" fill="#8A6A1F"/><rect x="540" y="400" width="100" height="10" rx="5" fill="#8A6A1F"/>
+</svg>

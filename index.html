@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Login - LS Invoice</title>
+    <meta name="description" content="LS Invoice — invoices, client items and payments for Naira businesses." />
+    <meta name="theme-color" content="#0B0B0B" />
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="icon" type="image/svg+xml" href="./icons/icon.svg" />
+    <link rel="apple-touch-icon" href="./icons/icon.svg" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <!-- If the code cannot start at all, say so on the page instead of showing a
+         white screen: a phone has no console in reach. Hidden unless it fires. -->
+    <div
+      id="boot-error"
+      hidden
+      style="display:none;padding:16px;font:14px/1.5 system-ui,sans-serif;color:#0b0b0b;background:#fdf7e6"
+    ></div>
+    <script>
+      (function () {
+        function show(what) {
+          var box = document.getElementById('boot-error')
+          if (!box) return
+          box.hidden = false
+          box.style.display = 'block'
+          box.textContent = 'LS Invoice could not start: ' + what
+        }
+        window.addEventListener('error', function (event) {
+          show(event.message || 'a script failed to load')
+        })
+        window.addEventListener('unhandledrejection', function (event) {
+          show((event.reason && event.reason.message) || 'a promise was rejected')
+        })
+      })()
+    </script>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

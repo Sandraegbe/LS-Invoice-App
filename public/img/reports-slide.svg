@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 870 713" width="870" height="713" role="img" aria-label="A report with sales, purchase and profit">
+  <rect width="870" height="713" rx="14" fill="#FBF3DD"/>
+  <rect x="26" y="26" width="818" height="661" rx="10" fill="#ffffff"/>
+  
+  <rect x="60" y="60" width="750" height="46" rx="8" fill="#FDF7E6"/>
+  <rect x="80" y="75" width="200" height="14" rx="7" fill="#8A6A1F"/>
+  <rect x="70" y="520" width="66" height="120" rx="6" fill="#F5C518"/><rect x="174" y="450" width="66" height="190" rx="6" fill="#C8A24A"/><rect x="278" y="490" width="66" height="150" rx="6" fill="#C8A24A"/><rect x="382" y="390" width="66" height="250" rx="6" fill="#F5C518"/><rect x="486" y="340" width="66" height="300" rx="6" fill="#C8A24A"/><rect x="590" y="430" width="66" height="210" rx="6" fill="#C8A24A"/><rect x="694" y="370" width="66" height="270" rx="6" fill="#F5C518"/>
+  <rect x="60" y="640" width="750" height="2" fill="#E8DFC9"/>
+  <rect x="60" y="660" width="700" height="10" rx="5" fill="#DED1AC"/><rect x="60" y="684" width="420" height="10" rx="5" fill="#DED1AC"/>
+  <rect x="520" y="120" width="290" height="150" rx="10" fill="#FFFDF5" stroke="#F1E7CE"/>
+  <rect x="544" y="146" width="240" height="10" rx="5" fill="#D5C8A2"/><rect x="544" y="174" width="240" height="10" rx="5" fill="#D5C8A2"/><rect x="544" y="202" width="240" height="10" rx="5" fill="#D5C8A2"/><rect x="544" y="230" width="144" height="10" rx="5" fill="#D5C8A2"/>
+</svg>

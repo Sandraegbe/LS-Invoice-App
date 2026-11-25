@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 710 466" width="710" height="466" role="img" aria-label="An invoice with item lines">
+  <rect width="710" height="466" rx="12" fill="#FBF3DD"/>
+  <rect x="18" y="18" width="674" height="430" rx="8" fill="#ffffff"/>
+  <rect x="18" y="18" width="674" height="46" rx="8" fill="#FDF7E6"/>
+  <circle cx="44" cy="41" r="6" fill="#ff6b6b"/>
+  <circle cx="64" cy="41" r="6" fill="#F5C518"/>
+  <circle cx="84" cy="41" r="6" fill="#E4CF8E"/>
+  
+  <rect x="44" y="90" width="300" height="16" rx="8" fill="#8A6A1F"/>
+  <rect x="44" y="126" width="380" height="9" rx="4.5" fill="#E8DFC9"/><rect x="44" y="150" width="380" height="9" rx="4.5" fill="#E8DFC9"/><rect x="44" y="174" width="228" height="9" rx="4.5" fill="#E8DFC9"/>
+  <rect x="44" y="200" width="622" height="36" rx="6" fill="#FFFDF5" stroke="#F1E7CE"/><rect x="44" y="246" width="622" height="36" rx="6" fill="#ffffff" stroke="#F1E7CE"/><rect x="44" y="292" width="622" height="36" rx="6" fill="#FFFDF5" stroke="#F1E7CE"/><rect x="44" y="338" width="622" height="36" rx="6" fill="#ffffff" stroke="#F1E7CE"/>
+  <rect x="58" y="212" width="220" height="10" rx="5" fill="#D5C8A2"/><rect x="58" y="258" width="220" height="10" rx="5" fill="#D5C8A2"/><rect x="58" y="304" width="220" height="10" rx="5" fill="#D5C8A2"/><rect x="58" y="350" width="220" height="10" rx="5" fill="#D5C8A2"/>
+  <rect x="520" y="212" width="120" height="10" rx="5" fill="#E4CF8E"/><rect x="520" y="258" width="120" height="10" rx="5" fill="#E4CF8E"/><rect x="520" y="304" width="120" height="10" rx="5" fill="#E4CF8E"/><rect x="520" y="350" width="120" height="10" rx="5" fill="#E4CF8E"/>
+  <rect x="440" y="330" width="226" height="60" rx="8" fill="#0B0B0B"/>
+  <rect x="460" y="352" width="120" height="14" rx="7" fill="#F5C518"/>
+</svg>

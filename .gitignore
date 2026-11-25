@@ -1,0 +1,23 @@
+# Dependencies
+node_modules/
+
+# Build output (the reviewer can rebuild it)
+build/
+dist/
+
+# Environment variables and secrets
+.env
+.env.*
+*.pem
+*serviceAccount*.json
+
+# Firebase local files
+.firebase/
+firebase-debug.log*
+.runtimeconfig.json
+
+# OS/editor files
+.DS_Store
+.vscode/
+
+for cv submission at Tech4dev link.txt
