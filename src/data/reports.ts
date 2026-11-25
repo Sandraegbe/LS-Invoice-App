@@ -12,7 +12,8 @@
  *                           outstanding balance, the demurrage accrued as an AMOUNT ONLY, the
  *                           revenue trend, and one card suggesting 20 % of this month as savings.
  *   2. Financial Detail     income by payment method, the status breakdown, totals per member of
- *                           staff and revenue by service category.
+ *                           staff, revenue by service category, and Express against Standard with
+ *                           the Express revenue by category.
  *   3. Client Performance   the top clients by revenue, new against returning, touches per
  *                           client and the outstanding balance per client.
  *
@@ -57,6 +58,15 @@ export interface ReportPayment {
   by: string
 }
 
+/**
+ * PHASE 51, ITEM 1 — the two service levels a report counts.
+ *
+ * An invoice with NO service level is Standard: nothing was ever chosen on it, so it went through
+ * like every invoice did before Express existed. That is the person's own rule, and it is applied
+ * in one place — levelOf() below — so no figure can read the stored field its own way.
+ */
+export type ServiceLevel = 'standard' | 'express'
+
 export interface ReportLine {
   category: string
   service: string
@@ -80,6 +90,12 @@ export interface ReportInvoice {
   paidKobo: number
   balanceKobo: number
   demurrageKobo: number
+  /** Standard or Express, with no level recorded counting as Standard. */
+  level: ServiceLevel
+  /** The Express days it recorded, or 0 when it recorded none. */
+  expressDays: number
+  /** Its Express fee in whole kobo, or 0 when it has none. */
+  expressFeeKobo: number
   lines: ReportLine[]
   payments: ReportPayment[]
 }
@@ -130,6 +146,15 @@ function statusOf(value: unknown): InvoiceStatus {
 function methodOf(value: unknown): PaymentMethod {
   if (value === 'cash' || value === 'transfer' || value === 'pos' || value === 'international') return value
   return 'cash'
+}
+
+/**
+ * The invoice's service level. Express only when the document says so: `serviceLevel` is read
+ * first, because every save from phase 50 on writes it beside `speed`, and `speed` is kept for the
+ * invoices saved before that. Nothing said at all — or any other word — is Standard.
+ */
+function levelOf(value: unknown): ServiceLevel {
+  return value === 'express' ? 'express' : 'standard'
 }
 
 /**
@@ -227,6 +252,9 @@ function invoiceFrom(id: string, data: Record<string, unknown>): ReportInvoice {
     paidKobo: count(data.paidKobo),
     balanceKobo: count(data.balanceKobo),
     demurrageKobo: count(data.demurrageKobo),
+    level: levelOf(data.serviceLevel ?? data.speed),
+    expressDays: count(data.expressDays),
+    expressFeeKobo: count(data.expressAmountKobo),
     lines,
     payments,
   }
@@ -522,6 +550,99 @@ export function financialReport(data: ReportsData, filters: ReportFilters): Fina
   }
 }
 
+/* ------------------------------------------------------------------ Express and Standard */
+
+/** One service level's own line of the card. */
+export interface LevelFigure {
+  level: ServiceLevel
+  label: string
+  invoices: number
+  /** Different clients behind those invoices. */
+  customers: number
+  invoicedKobo: number
+  paidKobo: number
+  /** That level's paid money as a whole per cent of everything paid in view; null when nothing was paid. */
+  sharePercent: number | null
+  /** Invoiced divided by the number of invoices, to the kobo. */
+  averageKobo: number
+  expressFeesKobo: number
+  /** Mean Express days over the invoices that recorded days; null when none did. */
+  averageDays: number | null
+}
+
+export interface ExpressReport {
+  /** Standard, then Express — always two lines, even when one of them is empty. */
+  levels: LevelFigure[]
+  /** The three service categories that brought the most Express revenue, most first. */
+  topCategories: MoneyFigure[]
+  /** How many clients have an invoice of each level. */
+  bothLevels: number
+}
+
+/**
+ * The Express and Standard card: the same invoices the rest of the dashboard counts, split two
+ * ways. What comes in is the invoice's own total (which already holds any Express fee) and what was
+ * paid is the invoice's own paid figure, so these two lines add up to the figures above them.
+ */
+export function expressReport(data: ReportsData, filters: ReportFilters): ExpressReport {
+  const matched = invoicesMatching(data.invoices, filters)
+  const everythingPaidKobo = matched.reduce((sum, invoice) => sum + invoice.paidKobo, 0)
+
+  const figureFor = (level: ServiceLevel): LevelFigure => {
+    const ofLevel = matched.filter((invoice) => invoice.level === level)
+    const invoicedKobo = ofLevel.reduce((sum, invoice) => sum + invoice.totalKobo, 0)
+    const paidKobo = ofLevel.reduce((sum, invoice) => sum + invoice.paidKobo, 0)
+    const withDays = ofLevel.filter((invoice) => invoice.expressDays > 0)
+    const days = withDays.reduce((sum, invoice) => sum + invoice.expressDays, 0)
+    return {
+      level,
+      label: level === 'express' ? 'Express' : 'Standard',
+      invoices: ofLevel.length,
+      customers: new Set(ofLevel.map((invoice) => invoice.clientId || invoice.clientName)).size,
+      invoicedKobo,
+      paidKobo,
+      sharePercent: everythingPaidKobo === 0 ? null : Math.round((paidKobo / everythingPaidKobo) * 100),
+      averageKobo: ofLevel.length === 0 ? 0 : Math.round(invoicedKobo / ofLevel.length),
+      expressFeesKobo: ofLevel.reduce((sum, invoice) => sum + invoice.expressFeeKobo, 0),
+      averageDays: withDays.length === 0 ? null : Math.round((days / withDays.length) * 10) / 10,
+    }
+  }
+
+  // Express revenue per service category: the line amounts on Express invoices, one count per
+  // invoice, so three lines of one invoice count as one Express invoice and their money adds up.
+  const categories = new Map<string, { kobo: number; invoices: Set<string> }>()
+  for (const invoice of matched) {
+    if (invoice.level !== 'express') continue
+    for (const line of invoice.lines) {
+      const key = line.category || line.service || 'Uncategorised'
+      const found = categories.get(key) ?? { kobo: 0, invoices: new Set<string>() }
+      found.kobo += line.amountKobo
+      found.invoices.add(invoice.id)
+      categories.set(key, found)
+    }
+  }
+  const topCategories: MoneyFigure[] = [...categories.entries()]
+    .map(([label, value]) => ({ label, kobo: value.kobo, count: value.invoices.size }))
+    .sort((a, b) => b.kobo - a.kobo || b.count - a.count)
+    .slice(0, 3)
+
+  const seen = new Map<string, { standard: boolean; express: boolean }>()
+  for (const invoice of matched) {
+    const key = invoice.clientId || invoice.clientName
+    const found = seen.get(key) ?? { standard: false, express: false }
+    if (invoice.level === 'express') found.express = true
+    else found.standard = true
+    seen.set(key, found)
+  }
+  const bothLevels = [...seen.values()].filter((row) => row.standard && row.express).length
+
+  return {
+    levels: [figureFor('standard'), figureFor('express')],
+    topCategories,
+    bothLevels,
+  }
+}
+
 export interface ClientsReport {
   top: MoneyFigure[]
   newClients: number
@@ -721,6 +842,7 @@ export function sectionsFor(dashboard: Dashboard, data: ReportsData, filters: Re
 
   if (dashboard === 'financial') {
     const report = financialReport(data, filters)
+    const express = expressReport(data, filters)
     return [
       {
         id: 'method',
@@ -756,6 +878,50 @@ export function sectionsFor(dashboard: Dashboard, data: ReportsData, filters: Re
                 cells: [row.label, formatNaira(row.kobo), String(row.count)],
                 kobo: row.kobo,
               })),
+      },
+      /* PHASE 51: the two levels side by side, and what Express brought in by category. */
+      {
+        id: 'levels',
+        heading: 'Express and Standard',
+        columns: [
+          'Service level',
+          'Invoices',
+          'Customers',
+          'Invoiced',
+          'Paid',
+          'Share of paid revenue',
+          'Average invoice value',
+          'Express fees',
+          'Average Express days',
+        ],
+        rows: express.levels.map((row) => ({
+          cells: [
+            row.label,
+            String(row.invoices),
+            String(row.customers),
+            formatNaira(row.invoicedKobo),
+            formatNaira(row.paidKobo),
+            row.sharePercent === null ? '—' : `${row.sharePercent}%`,
+            formatNaira(row.averageKobo),
+            formatNaira(row.expressFeesKobo),
+            row.averageDays === null ? '—' : `${row.averageDays} days`,
+          ],
+          kobo: row.invoicedKobo,
+        })),
+        note: 'An invoice with no service level counts as Standard. Share of paid revenue weighs that level against everything paid on the invoices in view. Average Express days covers only the Express invoices that recorded days.',
+      },
+      {
+        id: 'levels-categories',
+        heading: 'Express revenue by service category',
+        columns: ['Category', 'Express invoices', 'Express revenue'],
+        rows:
+          express.topCategories.length === 0
+            ? [{ cells: ['No Express invoice in this period', '', ''] }]
+            : express.topCategories.map((row) => ({
+                cells: [row.label, String(row.count), formatNaira(row.kobo)],
+                kobo: row.kobo,
+              })),
+        note: `Customers who used both levels: ${express.bothLevels}. The three categories above are the ones that brought the most Express revenue, counted from the line amounts on Express invoices, one invoice counted once.`,
       },
     ]
   }
