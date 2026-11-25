@@ -34,7 +34,7 @@ import {
 } from '../data/invoices'
 import { listInvites } from '../data/staff'
 import { listPeople } from '../data/people'
-import { officeOf } from '../data/offices'
+import { currentOfficeId, officeOf } from '../data/offices'
 import {
   flushShippingRecords,
   listShipments,
@@ -785,7 +785,7 @@ function ShippedInSection({
   onChanged: () => void
   onRefresh: () => void
 }) {
-  const mine = officeKey || officeOf(viewer.email) || ''
+  const mine = officeKey || currentOfficeId() || officeOf(viewer.email) || ''
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [busy, setBusy] = useState<string>('')
@@ -917,16 +917,17 @@ function ShippedInSection({
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
                 <strong className="text-[13px]">{shipment.item.itemName}</strong>
                 <span className="tag">{shipment.invoiceNo}</span>
-                <span className={SMALL}>line {shipment.lineNo || '—'}</span>
                 <span className={SMALL}>{shipment.item.service || 'Service not named'}</span>
                 <span className={SMALL}>{shipment.item.serviceCategory || 'Category not named'}</span>
                 <span className={SMALL}>qty {shipment.item.quantity || 0}</span>
                 <span className={SMALL}>
                   {shipment.item.dateOfTransaction ? `dated ${dayOf(shipment.item.dateOfTransaction)}` : 'no date'}
                 </span>
-                <span className={SMALL}>from {shipment.originOfficeName}</span>
               </div>
-              <p className={SMALL}>{shipment.item.workToBeDone || 'No work written down'}</p>
+              <p className={SMALL}>
+                <strong className="text-[12px] font-semibold">Treatment Required:</strong>{' '}
+                {shipment.item.workToBeDone || 'No work written down'}
+              </p>
               <p className={SMALL}>
                 {shipmentStatusLabel(shipment.status)} — {shipment.shippedBy || 'someone'}
                 {shipment.shippedAt ? ` on ${dayOf(shipment.shippedAt)}` : ''}
@@ -1118,7 +1119,7 @@ function PickupSection({
   /** The person handing the item over is the one signed in, so the form does not ask again. */
   const releasedBy = viewer.name || viewer.email
   /** The sub account this person belongs to: the one an item comes back to. */
-  const myOffice = officeOf(viewer.email) || ''
+  const myOffice = currentOfficeId() || officeOf(viewer.email) || ''
 
   useEffect(() => {
     setReturns(listShipments(orgId))
@@ -1136,6 +1137,15 @@ function PickupSection({
   const waitingBack = returns.filter(
     (shipment) => shipment.originOfficeId === myOffice && shipment.status === 'shipped-back',
   )
+
+  /* PHASE 55, item 4: an item that is away at another sub account is not here. Its line cannot be
+     collected until the destination sends it back and somebody presses Received. */
+  const away = new Set(
+    returns
+      .filter((shipment) => shipment.originOfficeId === myOffice && shipment.status !== 'received')
+      .map((shipment) => shipment.lineId),
+  )
+  const atHome = (line: InvoiceLine) => !away.has(line.id)
 
   function retryReturns() {
     setReturnsProblem(null)
@@ -1194,7 +1204,7 @@ function PickupSection({
    * is gone, so a card appears only because the line itself says the work is approved.
    */
   const cards = invoices
-    .flatMap((invoice) => waitingLines(invoice).map((line) => ({ invoice, line })))
+    .flatMap((invoice) => waitingLines(invoice).filter(atHome).map((line) => ({ invoice, line })))
     .sort((left, right) => {
       const byClient = (left.invoice.clientName || 'Client').localeCompare(right.invoice.clientName || 'Client')
       if (byClient !== 0) return byClient
@@ -1215,7 +1225,7 @@ function PickupSection({
         (invoice) =>
           invoice.id !== openCard.invoice.id &&
           (invoice.clientName || 'Client') === (openCard.invoice.clientName || 'Client') &&
-          waitingLines(invoice).length > 0,
+          waitingLines(invoice).filter(atHome).length > 0,
       )
     : []
   const targets = openCard
@@ -1329,7 +1339,9 @@ function PickupSection({
       const result = await savePickupCollection({
         invoices: targets.map((invoice) => ({
           id: invoice.id,
-          lineIds: waitingLines(invoice).map((line) => line.id),
+          lineIds: waitingLines(invoice)
+            .filter(atHome)
+            .map((line) => line.id),
         })),
         image: drawn,
         name: collector.trim(),
@@ -1718,7 +1730,10 @@ export function WorkshopPanel({ viewer, orgId, start }: Props) {
     setReading(true)
     try {
       const org = orgId || 'local'
-      const office = officeOf(viewer.email)
+      /* PHASE 55: the sub account in view — the one an owner or admin opened, or a staff
+         login's own. The owner belongs to no office of their own, so officeOf(email) alone
+         left every shipment list empty for them. */
+      const office = currentOfficeId() || officeOf(viewer.email)
       setInvoices(listInvoices(org))
       // Item 4: that office's active staff, and the business's admins with them. The invites list
       // says who is staff and where they work; the users list says who is an admin.

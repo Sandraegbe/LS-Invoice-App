@@ -728,19 +728,24 @@ service cloud.firestore {
       allow delete: if false;
     }
 
-        match /driveConnections/{connectionId} {
-      allow read: if signedIn() && sameOrg(resource.data.orgId);
+     match /driveConnections/{connectionId} {
+      allow read: if signedIn() && sameOrg(resource.data.orgId)
+        && sameOffice(resource.data.get('officeId', ''));
 
       allow create, update: if signedIn() && !isDisabled()
         && request.resource.data.orgId == currentUser().orgId
+        && request.resource.data.get('officeId', '') == connectionId
         && (isAdminHere()
-            || (connectionId == 'subAccounts' && myOffice() != ''
-                && get(/databases/$(database)/documents/offices/$(myOffice())).data.get('sections', {}).get('drive', true) == true))
+  || (connectionId == myOffice() && connectionId != ''
+        && get(/databases/$(database)/documents/offices/$(connectionId)).data.get('sections', {}).get('drive', true) == true))
         && request.resource.data.email is string
         && request.resource.data.rootFolderId is string
-        && request.resource.data.keys().hasOnly(['orgId', 'email', 'rootFolderId', 'connectedAt', 'updatedAt']);
+        && request.resource.data.keys().hasOnly(['orgId', 'officeId', 'email', 'rootFolderId', 'connectedAt', 'updatedAt']);
 
-      allow delete: if isAdminHere() && sameOrg(resource.data.orgId);
+      allow delete: if signedIn() && sameOrg(resource.data.orgId)
+        && (isAdminHere()
+  || (resource.data.get('officeId', '') == myOffice() && myOffice() != ''
+        && get(/databases/$(database)/documents/offices/$(myOffice())).data.get('sections', {}).get('drive', true) == true));
     }
 
     // names-only list of sub accounts, so shipping can offer a destination
