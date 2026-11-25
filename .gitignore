@@ -21,3 +21,5 @@ firebase-debug.log*
 .vscode/
 
 for cv submission at Tech4dev link.txt
+tsconfig.tsbuildinfo
+tmp-*.txt
