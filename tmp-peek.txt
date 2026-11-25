@@ -1,9 +1,0 @@
-top: a11y, assets, breakpoints, design, forms, headings, health, lang, layouts, links, meta, outline, page, text, title, unreadable_stylesheets, url, viewport
-layout keys: blocks, page_h, page_w, type, width
-  blocks: array of 8
-    first keys: background, h, pad, per_row, tag, w, y
-    first: {"background":"#ffffff","h":88,"pad":[0,0,0,0],"per_row":2,"tag":"header","w":1425,"y":66}
-  page_h: 3413
-  page_w: 1425
-  type: object {body, h1, h2, h3}
-  width: 1440
