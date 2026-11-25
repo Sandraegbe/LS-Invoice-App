@@ -6,18 +6,26 @@
  * In "All offices" — the owner's and the admins' own view — it is exactly as it has always been: the
  * whole business's Drive, the connection chip (Connected / Not connected), the connected Google
  * email, the Connect and Disconnect buttons, and the sync summary drawn inside it. Nothing in phase
- * 54 changed that view.
+ * 54 changed that view, and "No office yet" is the same card.
  *
- * Inside one office — PH or Lagos — the very same card belongs to that office ALONE (phase 54). It
- * carries the chip, that office's own connected Google email, its own folders, its own sync summary
- * and three buttons: Connect, Disconnect and Sync now. It never shows another office's email, root
- * or folders, because it reads one document: driveConnections/{officeId}, whose id is the office's
- * id and never its name. A sub user whose Google Drive section is switched off in "Sections this
- * sub account can see" does not see this card at all — the screen does not draw it.
+ * Inside one office — PH or Lagos — the very same card belongs to that office ALONE (phase 54).
  *
- * Connect opens the key keeper's consent window with the office's id in the address. When it comes
- * back, the six folders of that office are made ready in that office's own Google account, by id,
- * so reconnecting or renaming the office never makes a second set of them.
+ *   · ALL OFFICES SHARE ONE GOOGLE ACCOUNT. The connection is the one record the app has always
+ *     kept, driveConnections/subAccounts, so Lagos connecting shows PH as Connected too, and the
+ *     reverse. Nobody but the key keeper ever holds the Google key.
+ *   · What is per office is its FOLDERS: driveFolders/{officeId}, whose id is the office's ID and
+ *     never its name. This office sees its own set and its own sync summary, and never another
+ *     office's.
+ *   · The buttons are open to the owner, an admin, and any sub user whose Google Drive section is
+ *     on: Connect and "Sync now" (one run of the existing sync for this office, saying how many
+ *     records it sent). Disconnect is an owner's or an admin's alone, because it lets go for every
+ *     office at once. A sub user whose Google Drive section is off never sees this card: the screen
+ *     does not draw it.
+ *
+ * Connect creates the six folders of the office that pressed it, and — from an owner's or an
+ * admin's device — fills in any office that has none yet. Connecting twice, reconnecting, or
+ * renaming an office can never leave a second set behind: the folders are found by the office's ID
+ * and a set that is already saved is left exactly as it is.
  *
  * No key, token or password is ever stored in this app or in the database the app writes — the
  * record holds the email, the root folder's id and when it was connected, and nothing else.
@@ -28,12 +36,11 @@ import { listOffices } from '../data/offices'
 import {
   SUB_FOLDER_KEYS,
   SUB_FOLDER_NAMES,
-  connectOfficeDrive,
+  connectDriveForOffice,
+  connectMissingOfficeFolders,
   connectSharedDrive,
-  disconnectOfficeDrive,
   disconnectSharedDrive,
   ensureSubFolders,
-  loadOfficeConnection,
   loadSharedConnection,
   loadSubFolders,
   type SharedConnection,
@@ -43,12 +50,14 @@ import { syncNowForOffice } from '../data/sync'
 interface SharedDriveCardProps {
   /** The business this Drive belongs to. */
   orgId: string
-  /** Inside one office: that office's own Google account, folders and counts alone. */
+  /** Inside one office: that office's folders and counts, and its own Sync now. */
   inside?: boolean
-  /** The office whose own records this card reads, when inside one. */
+  /** The office whose folders and records this card reads, when inside one. */
   officeId?: string
-  /** True when this person may press Connect, Disconnect and Sync now. */
+  /** Connect and Sync now: the owner, an admin, and any sub user whose Drive section is on. */
   canManage?: boolean
+  /** Disconnect: the owner and an admin alone — it lets go for every office at once. */
+  canDisconnect?: boolean
   /** The sync summary for whatever this card is about, drawn inside it. */
   children?: ReactNode
 }
@@ -64,10 +73,11 @@ export function SharedDriveCard({
   inside = false,
   officeId = '',
   canManage = false,
+  canDisconnect = canManage,
   children,
 }: SharedDriveCardProps) {
   const [connection, setConnection] = useState<SharedConnection | null>(null)
-  /** This office's own folder record, once it has been read: its names and its six ids. */
+  /** This office's own folder record, once it has been read: its name and its six ids. */
   const [folders, setFolders] = useState<Awaited<ReturnType<typeof loadSubFolders>>>(null)
   /** False until the records have been read once, so "Not connected" is never a guess. */
   const [checked, setChecked] = useState(false)
@@ -79,8 +89,9 @@ export function SharedDriveCard({
   useEffect(() => {
     let live = true
     void (async () => {
-      // PHASE 54: inside an office the card reads THAT office's own document and nothing else.
-      const found = inside && officeId ? await loadOfficeConnection(orgId, officeId) : await loadSharedConnection(orgId)
+      // PHASE 54: every office reads the SAME connection record. What is per office is the folders
+      // below, read by the office's id — so another office's folders can never appear here.
+      const found = await loadSharedConnection(orgId)
       const own = officeId ? await loadSubFolders(officeId) : null
       if (!live) return
       setConnection(found)
@@ -97,17 +108,27 @@ export function SharedDriveCard({
     setMessage(null)
     try {
       if (inside && officeId) {
-        const next = await connectOfficeDrive(orgId, officeId)
+        const office = listOffices(orgId).find((one) => one.id === officeId) ?? null
+        // PHASE 54, task 2: the six folders of the office that pressed Connect, made straight away.
+        const next = await connectDriveForOffice(
+          orgId,
+          office ? { id: office.id, name: office.name, prefix: office.prefix } : null,
+        )
         setConnection(next)
-        // PHASE 54, task 2: the six folders are made in THIS office's own account, by its id.
-        const office = listOffices(orgId).find((one) => one.id === officeId)
-        try {
-          await ensureSubFolders({ id: officeId, orgId, name: office?.name ?? '', prefix: office?.prefix ?? '' })
-        } catch {
-          /* made again on the next Connect, or when this office is next saved */
+        // ...and, on an owner's or an admin's device, the six folders of every office that has none.
+        let made = 0
+        if (canDisconnect) {
+          made = await connectMissingOfficeFolders(
+            orgId,
+            listOffices(orgId)
+              .filter((one) => one.active)
+              .map((one) => ({ id: one.id, name: one.name, prefix: one.prefix })),
+          )
         }
         setMessage(
-          `Connected as ${next.email}. The six folders are ready in this office’s own Google Drive, and only this office’s files and records go there.`,
+          `Connected as ${next.email}. Every office uses this one Google account; this office’s folders are ready${
+            made > 0 ? `, and ${made} other ${made === 1 ? 'office' : 'offices'} got theirs` : ''
+          }.`,
         )
         setVersion((count) => count + 1)
         return
@@ -134,21 +155,20 @@ export function SharedDriveCard({
     }
   }
 
+  /**
+   * PHASE 54: Disconnect is an owner's or an admin's alone, and it says so before it happens: the
+   * Google account is shared, so letting go of it lets go for every office at once.
+   */
   async function onDisconnect() {
+    if (!canDisconnect) return
+    const sure = typeof window === 'undefined' ? false : window.confirm('This disconnects Google Drive for all offices.')
+    if (!sure) return
     setBusy('disconnect')
     setMessage(null)
     try {
-      if (inside && officeId) {
-        await disconnectOfficeDrive(officeId)
-        setConnection(null)
-        setMessage(
-          'Disconnected. Nothing was deleted from this office’s Google Drive, and the folders already made stay there.',
-        )
-      } else {
-        await disconnectSharedDrive()
-        setConnection(null)
-        setMessage('Disconnected. Nothing was deleted from the Google Drive, and the folders already made stay there.')
-      }
+      await disconnectSharedDrive()
+      setConnection(null)
+      setMessage('Disconnected. Nothing was deleted from the Google Drive, and the folders already made stay there.')
       setVersion((count) => count + 1)
     } catch (cause) {
       setMessage(cause instanceof Error ? cause.message : 'The key keeper did not let go of the connection.')
@@ -169,9 +189,11 @@ export function SharedDriveCard({
       const result = await syncNowForOffice(officeId)
       const sent = result.sent === 1 ? '1 record' : `${result.sent} records`
       if (result.waiting === 0) {
-        setMessage(`Synced. ${sent} sent to this office’s Google Drive, and nothing is waiting.`)
+        setMessage(`Synced. ${sent} sent to this office’s folder in Google Drive, and nothing is waiting.`)
       } else if (result.sent > 0) {
-        setMessage(`Synced. ${sent} sent to this office’s Google Drive; ${result.waiting} still waiting. ${result.reason}`)
+        setMessage(
+          `Synced. ${sent} sent to this office’s folder in Google Drive; ${result.waiting} still waiting. ${result.reason}`,
+        )
       } else {
         setMessage(`Nothing was sent just now. ${result.waiting} record(s) still waiting. ${result.reason}`)
       }
@@ -187,12 +209,12 @@ export function SharedDriveCard({
   const chip = !checked ? 'Checking…' : connected ? 'Connected' : 'Not connected'
   /*
    * The line under the title. In "All offices" it names the business's own account, exactly as
-   * before. Inside one office it names THAT office's account — never another office's — because a
-   * sub user of Lagos is allowed to know which account Lagos sends to and nothing more.
+   * before. Inside one office it still names the one shared account — a sub user of Lagos is allowed
+   * to know which account Lagos sends to — and says that only this office's folders are shown here.
    */
   const line = inside
     ? connection
-      ? `Connected as ${connection.email} · this office’s own Google account, and only this office’s files and records go there${
+      ? `Connected as ${connection.email} · this office’s folders only, inside that one shared account${
           connection.connectedAt
             ? ` · connected ${new Date(connection.connectedAt).toLocaleDateString('en-GB').replace(/\//g, '-')}`
             : ''
@@ -217,19 +239,21 @@ export function SharedDriveCard({
       </div>
 
       {inside && folders ? (
-        <p className="mt-3 text-[12px] text-ink-soft/70">Folders: {folderList(folders.folders)}</p>
+        <p className="mt-3 text-[12px] text-ink-soft/70">This office’s folders: {folderList(folders.folders)}</p>
       ) : null}
 
-      {canManage ? (
+      {canManage || canDisconnect ? (
         <div className="mt-3 flex flex-wrap gap-2">
           {connection ? null : (
             <button type="button" className="chip" onClick={onConnect} disabled={busy !== null}>
               Connect
             </button>
           )}
-          <button type="button" className="chip" onClick={onDisconnect} disabled={busy !== null || !connection}>
-            Disconnect
-          </button>
+          {canDisconnect ? (
+            <button type="button" className="chip" onClick={onDisconnect} disabled={busy !== null || !connection}>
+              Disconnect
+            </button>
+          ) : null}
           {inside ? (
             <button type="button" className="chip" onClick={onSyncNow} disabled={busy !== null || !connection}>
               Sync now

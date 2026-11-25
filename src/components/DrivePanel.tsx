@@ -44,6 +44,11 @@ interface DrivePanelProps {
    */
   canSync?: boolean
   /**
+   * PHASE 54: Disconnect belongs to an owner or an admin alone. It lets go of the one Google account
+   * every office shares, so it is never offered to a sub user — while Connect and Sync now are.
+   */
+  canDisconnect?: boolean
+  /**
    * PHASE 24, ITEM 3: "Sync" and "Google Drive" are two separate sections an office may be given.
    * Either half can be left out; both default on, so the owner's own screen is unchanged.
    */
@@ -61,6 +66,7 @@ export function DrivePanel({
   orgId = '',
   canManage,
   canSync = canManage,
+  canDisconnect = canManage,
   showSync = true,
   showDrive = true,
   officeId = '',
@@ -88,7 +94,13 @@ export function DrivePanel({
   const invoices = Array.from(new Set(mine.filter((job) => job.status !== 'synced').map((job) => job.invoiceNo)))
 
   return (
-    <SharedDriveCard orgId={orgId} inside={inside} officeId={officeId} canManage={canSync}>
+    <SharedDriveCard
+      orgId={orgId}
+      inside={inside}
+      officeId={officeId}
+      canManage={canSync}
+      canDisconnect={canDisconnect}
+    >
       {showSync ? (
         canManage ? (
           <>

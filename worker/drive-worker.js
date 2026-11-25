@@ -4,53 +4,60 @@
  * WHAT IT IS FOR
  * Everything the app saves that belongs in a Google Drive — the Clients records, the pictures and
  * videos, the links, the invoice PDFs and the delivery notes — is handed to this Worker. The Worker
- * puts it in the right folder. No Google key, token or password ever reaches a browser, and no
- * member of staff signs in to Google at all.
+ * puts it in the right sub account's folder. No Google key, token or password ever reaches a
+ * browser, and no member of staff signs in to Google at all.
  *
- * PHASE 54 — ONE GOOGLE ACCOUNT FOR EACH OFFICE
- * Every office of a business (Lagos, PH, and any office added later) has its OWN Google connection,
- * and this Worker keeps each one apart:
+ * PHASE 54 — ONE GOOGLE ACCOUNT FOR ALL THE OFFICES, ONE FOLDER SET EACH
+ * Lagos, PH and any office added later all use the SAME Google account, connected once for the
+ * whole business. Inside it there is one root folder, "LS Invoice Files", and inside that one folder
+ * per office, named "[office name] ([prefix])" — e.g. "Lagos (LOS)" — each holding six folders:
  *
- *   · a request says which office it is for, by the office's ID — never by its name. Renaming an
- *     office changes nothing at all here, and can never make a second set of folders.
- *   · one key per office, under a name built from the business's id and the office's id:
- *         offices:key:<orgId>:<officeId>       the lasting key Google gave that office
- *         offices:access:<orgId>:<officeId>    a short-lived access token for it
- *         offices:email:<orgId>:<officeId>     that office's connected Google address
- *         offices:root:<orgId>:<officeId>      "LS Invoice Files" in that office's own account
- *   · an office's key is used only for that office's uploads. One office's key is never used to
- *     send another office's file, and one office's email is never returned to another office.
- *   · inside that office's own account the six folders sit straight inside "LS Invoice Files":
+ *     Incoming Invoices · Clients · Images · Videos · URLs · Delivery Notes
  *
- *         Incoming Invoices · Clients · Images · Videos · URLs · Delivery Notes
+ * The ids of an office's six folders live in driveFolders/{officeId}, whose document id is the
+ * office's ID and never its name. So renaming an office changes nothing here, and a rename can
+ * never fork a second set of folders. Every folder is made by looking first and creating only what
+ * is missing, so reconnecting — or renaming — never leaves a duplicate behind.
  *
- *     There is no "[office name] ([prefix])" folder in an office's own account, because the account
- *     is already that office's: nothing there is named after the office, so renaming it makes no
- *     new folders and reconnecting finds the same six.
- *
- * WHAT DID NOT CHANGE
- *   · The business-wide connection, "All offices", is exactly as it was: the same KV names
- *     (subaccounts:key / access / email / root / state), the same routes, the same behaviour, and it
- *     needs no reconnecting. Its "LS Invoice Files" still holds one folder per office.
- *   · The key kept per login — left exactly as it is: this file never reads, writes or deletes it.
- *   · The bindings and secrets are the same three (DRIVE_KV, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET)
- *     plus FIREBASE_PROJECT_ID and APP_ORIGIN. Nothing new is needed.
- *   · The Google redirect address is still this Worker's address + /subaccounts/callback, so the
- *     OAuth client in Google Cloud needs no change either.
+ * What did NOT change, on purpose:
+ *   · The KV names, exactly as they were: subaccounts:key / access / email / root / state. Any
+ *     business that is already connected stays connected; nobody has to connect again.
+ *   · The routes, exactly as they were: /subaccounts/status, /subaccounts/folders,
+ *     /subaccounts/lookup, /subaccounts/disconnect, /subaccounts/callback, /connect-subaccounts and
+ *     /upload. A plain "/" now answers a health line, so opening the Worker says it is running.
+ *   · The key the Worker already kept per login — the admin's own Drive — is left exactly as it is:
+ *     this file never reads, writes or deletes it, so nothing that worked before is disturbed.
+ *   · The bindings and secrets: the same KV namespace and GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET.
+ *     The namespace is read from DRIVE_KV, and from GOOGLE_KEYS if that is the name it carries.
+ *   · The Google redirect address is still this Worker's address + /subaccounts/callback.
  *
  * WHO MAY DO WHAT
- * The Worker never trusts what the app says about who is asking. Every call carries the person's
- * own Firebase sign-in token, and the Worker reads that person's own users/{uid} document from
- * Firestore over its REST interface using that same token — so the database's own security rules
- * decide what it is allowed to see, and no service account is used anywhere. For anything about a
- * particular office it also reads that office's own offices/{officeId} document the same way.
+ * The Worker never trusts what the app says about who is asking. Every call carries the person's own
+ * Firebase sign-in token, and the Worker reads that person's own users/{uid} document from Firestore
+ * over its REST interface using that same token — so the database's own security rules decide what
+ * it is allowed to see, and no service account is used anywhere. When a call names an office, the
+ * Worker reads that office's own offices/{officeId} document the same way.
  *
- *   · an office's own Google account (status, connect, disconnect, folders, a file):
- *         allowed when the caller is an owner or an admin of the business, OR when the caller's own
- *         officeId is that office AND that office's sections.drive is not false AND the caller's
- *         login is not switched off. A switched-off login is refused before any of this.
- *   · the business-wide connection ("All offices"): owners and admins only, exactly as before.
- *   · a sub account's records are routed by its id, never by the letters in an invoice number.
+ *   · CONNECT — an owner or an admin, OR a person who is not switched off, whose own officeId is the
+ *     office named in the request, in an office whose sections.drive is not false. Any sub user
+ *     whose Google Drive section is on may press Connect, and it connects the one shared account.
+ *   · A FILE OR RECORD, and the folder list that supports it — the same rule: an owner or an admin,
+ *     or a member of that very office. An upload only ever goes into a folder id that belongs to
+ *     the named office, read from driveFolders/{officeId}.
+ *   · STATUS AND FOLDERS IN ONE OFFICE — the same rule again, so an office can see the connection
+ *     and make its own folders without being an admin.
+ *   · DISCONNECT — an owner or an admin alone, because it lets go for every office at once.
+ *   · A sub account's records are routed by its id, never by the letters in an invoice number.
+ *
+ * WHAT IT KEEPS (all in the same KV namespace the Worker already uses)
+ *   · the key it already kept per login — left exactly as it is: this file never reads, writes or
+ *     deletes it, so nothing that worked before is disturbed.
+ *   · subaccounts:key:<orgId>      the sub accounts' Google account, once for the whole business.
+ *   · subaccounts:access:<orgId>   a short-lived access token, so Google is not asked every time.
+ *   · subaccounts:email:<orgId>    the address that was connected, for the card to show.
+ *   · subaccounts:root:<orgId>     the id of the "LS Invoice Files" folder in that account.
+ *   · subaccounts:state:<random>   the ten-minute handshake while a person is on Google's page.
+ * No key is ever returned to a browser, and none is written into Firestore.
  *
  * ---------------------------------------------------------------------------------------------
  * WHAT TO DO — CLICK BY CLICK. (Nothing here needs a terminal, and you paste no secret.)
@@ -68,19 +75,19 @@
  *    Leave GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET and the existing DRIVE_KV binding exactly as they
  *    are. Nothing new is needed there.
  * 8. Nothing changes in Google Cloud: the same OAuth client and the same
- *    /subaccounts/callback redirect address are used for every office.
- * 9. In the app, sign in and open Settings → Storage link. Inside an office, press Connect and sign
- *    in with THAT office's own Google account and allow access. The window closes itself, the card
- *    shows Connected as that address, and the six folders are made in that account straight away.
- * 10. Do it once per office. Each office then sees only its own address, its own folders and its own
- *     records. Offices are never connected from "All offices" — that card keeps the whole
- *     business's Drive exactly as it always has.
+ *    /subaccounts/callback redirect address are used.
+ * 9. In the app, open Settings → Storage link. In "All offices" press Connect once, and sign in with
+ *    the account every office shares; or press Connect inside any office — Lagos, PH — and it is the
+ *    same single connection, so every office shows Connected afterwards. The six folders of the
+ *    office that pressed it are made straight away, and an owner's or an admin's device also makes
+ *    the six for any office that has none yet.
+ * 10. That is all. Every office then sees its own folder set, its own records and its own counts.
  *
  * IF SOMETHING IS NOT RIGHT
  *   · "The key keeper did not answer yet" — step 6 was not finished; deploy again and wait.
  *   · "forbidden" — that login is not an owner/admin, or not a member of that office, or that
  *     office's Google Drive section is switched off in "Sections this sub account can see".
- *   · "not connected" — step 9 has not been done for that office yet.
+ *   · "not connected" — step 9 has not been done yet.
  *   · A record is never thrown away for any of these: it waits in the app and says why.
  */
 
@@ -103,27 +110,18 @@ const FOLDER_NAMES = {
   deliveryNotes: 'Delivery Notes',
 }
 
-/* The business-wide key, unchanged since phase 41 — "All offices" uses this one and nobody else. */
 const KEY = (orgId) => `subaccounts:key:${orgId}`
 const ACCESS = (orgId) => `subaccounts:access:${orgId}`
 const EMAIL = (orgId) => `subaccounts:email:${orgId}`
 const ROOT = (orgId) => `subaccounts:root:${orgId}`
 const STATE = (state) => `subaccounts:state:${state}`
 
-/* PHASE 54: one key per office, named by the business's id AND the office's id — never its name. */
-const OKEY = (orgId, officeId) => `offices:key:${orgId}:${officeId}`
-const OACCESS = (orgId, officeId) => `offices:access:${orgId}:${officeId}`
-const OEMAIL = (orgId, officeId) => `offices:email:${orgId}:${officeId}`
-const OROOT = (orgId, officeId) => `offices:root:${orgId}:${officeId}`
-
 /**
- * Where one request's key lives. No office named → the business-wide key, exactly as before. An
- * office named → that office's own key and nothing else, so two offices can never share one.
+ * The KV namespace. It was bound as DRIVE_KV and that name is kept, so nothing already stored is
+ * lost; GOOGLE_KEYS is accepted too, so the binding may be called either name in Cloudflare.
  */
-function slotsFor(orgId, officeId) {
-  return officeId
-    ? { key: OKEY(orgId, officeId), access: OACCESS(orgId, officeId), email: OEMAIL(orgId, officeId), root: OROOT(orgId, officeId) }
-    : { key: KEY(orgId), access: ACCESS(orgId), email: EMAIL(orgId), root: ROOT(orgId) }
+function storeOf(env) {
+  return env.DRIVE_KV || env.GOOGLE_KEYS
 }
 
 /* ------------------------------------------------------------------------------ small helpers */
@@ -254,16 +252,14 @@ function mayWriteFor(caller, officeId) {
 }
 
 /**
- * PHASE 54 — may this person act for THAT office's own Google account?
- *
- * An owner or an admin may set up any office of their own business. Anyone else may act only for
- * their own office, and only while that office's Google Drive section is not switched off and their
- * own login is not switched off (callerOf has already settled the second one). Both the person's
- * document and the office's document are read with the person's own token, so the database's rules
- * have the last word.
+ * PHASE 54 — may this person act for THAT office? An owner or an admin may act for any office of
+ * their own business. Anyone else may act only for their own office, in an office whose Google
+ * Drive section is not switched off, and only while their own login is not switched off (callerOf
+ * has already settled the second one). Both documents are read with the person's own token, so the
+ * database's rules have the last word.
  */
 async function mayUseOffice(env, caller, officeId) {
-  if (!officeId) return { ok: false, problem: problem(400, 'Which office? This needs the office id.') }
+  if (!officeId) return { ok: false, problem: problem(400, 'Which office? This request needs the office id.') }
   if (!caller.orgId) return { ok: false, problem: problem(409, 'That login has no business yet.') }
   let office = null
   try {
@@ -276,12 +272,12 @@ async function mayUseOffice(env, caller, officeId) {
   }
   if (caller.manages) return { ok: true }
   if (caller.officeId !== officeId) {
-    return { ok: false, problem: problem(403, 'That Google account belongs to another office.') }
+    return { ok: false, problem: problem(403, 'That Drive belongs to another office.') }
   }
   if (!office) return { ok: false, problem: problem(403, 'That office could not be read, so nothing can be sent to it.') }
   const sections = office.sections && typeof office.sections === 'object' ? office.sections : null
-  // Only a section that is actually switched off stops this; an office with no section map at all
-  // has never switched it off, so it is allowed — the same rule the app's screens use.
+  // Only a section that is actually switched off stops this. An office with no section map at all
+  // has never switched it off, so it is allowed — the same rule the app's own screens use.
   if (sections && sections.drive === false) {
     return { ok: false, problem: problem(403, 'Google Drive is switched off for this office.') }
   }
@@ -290,21 +286,11 @@ async function mayUseOffice(env, caller, officeId) {
 
 /* ------------------------------------------------------------------------ the Google account */
 
-/**
- * An access token for one connection. When an office is named, that office's OWN key is used; if
- * that office has no connection of its own yet, the business-wide key is used, exactly as before
- * phase 54 — and never another office's key.
- */
-async function accessToken(env, orgId, officeId) {
-  const own = officeId ? await env.DRIVE_KV.get(slotsFor(orgId, officeId).key) : null
-  const slots = own ? slotsFor(orgId, officeId) : slotsFor(orgId, '')
-  const refreshKey = own || (await env.DRIVE_KV.get(slots.key))
-  return renew(env, slots, refreshKey)
-}
-
-async function renew(env, slots, refresh) {
-  const kept = await env.DRIVE_KV.get(slots.access, 'json')
+async function accessToken(env, orgId) {
+  const store = storeOf(env)
+  const kept = await store.get(ACCESS(orgId), 'json')
   if (kept && kept.token && kept.until > Date.now() + 30_000) return kept.token
+  const refresh = await store.get(KEY(orgId))
   if (!refresh) throw new Error('not-connected')
   const response = await fetch(GOOGLE_TOKEN, {
     method: 'POST',
@@ -319,8 +305,8 @@ async function renew(env, slots, refresh) {
   if (!response.ok) {
     const detail = await response.text()
     if (response.status === 400 && /invalid_grant/i.test(detail)) {
-      // Google refused the kept key: that connection is gone, so say so rather than fail a file.
-      await env.DRIVE_KV.delete(slots.key)
+      // Google refused the kept key: the connection is gone, so say so rather than fail a file.
+      await store.delete(KEY(orgId))
       throw new Error('not-connected')
     }
     throw new Error(`Google would not renew the key (${response.status}). ${detail.slice(0, 200)}`)
@@ -328,7 +314,7 @@ async function renew(env, slots, refresh) {
   const answer = await response.json()
   const token = String(answer.access_token || '')
   const seconds = Number(answer.expires_in || 3000)
-  if (token) await env.DRIVE_KV.put(slots.access, JSON.stringify({ token, until: Date.now() + seconds * 1000 }), { expirationTtl: Math.max(60, seconds - 60) })
+  if (token) await store.put(ACCESS(orgId), JSON.stringify({ token, until: Date.now() + seconds * 1000 }), { expirationTtl: Math.max(60, seconds - 60) })
   return token
 }
 
@@ -362,7 +348,7 @@ async function findOrCreateFolder(token, name, parentId) {
   return String(answer.id)
 }
 
-/** Every one of the six folders inside one sub account's folder (the business-wide account). */
+/** Every one of the six folders inside one sub account's folder, making whatever is missing. */
 async function folderSetFor(token, rootId, name) {
   const parent = await findOrCreateFolder(token, name, rootId)
   const folders = {}
@@ -370,19 +356,6 @@ async function folderSetFor(token, rootId, name) {
     folders[key] = await findOrCreateFolder(token, folderName, parent)
   }
   return { root: parent, folders }
-}
-
-/**
- * PHASE 54 — the six folders straight inside ONE office's own "LS Invoice Files". Nothing here is
- * named after the office: the account is already the office's, so renaming the office creates no
- * new folder and reconnecting finds these same six.
- */
-async function officeFolderSetFor(token, rootId) {
-  const folders = {}
-  for (const [key, folderName] of Object.entries(FOLDER_NAMES)) {
-    folders[key] = await findOrCreateFolder(token, folderName, rootId)
-  }
-  return { root: rootId, folders }
 }
 
 /** The id of one sub account's folder of one kind, read from its own driveFolders document. */
@@ -416,9 +389,9 @@ async function uploadBytes(token, parentId, name, mimeType, bytes) {
 /* ---------------------------------------------------------------------------------- the routes */
 
 /**
- * Start a Google consent window. With `officeId` it connects THAT office's own account, and anyone
- * the office's own card allows may do it; without one it connects the business-wide account, which
- * stays owners and admins only, exactly as before.
+ * Start the Google consent window. With `officeId` it is any office the caller may act for (an
+ * owner, an admin, or that office's own staff while its Drive section is on); with no office id it
+ * stays owners and admins only, exactly as before. Either way it connects the ONE shared account.
  */
 async function handleConnect(env, request, url) {
   const idToken = url.searchParams.get('t') || bearer(request)
@@ -434,9 +407,9 @@ async function handleConnect(env, request, url) {
   }
 
   const state = crypto.randomUUID().replace(/-/g, '')
-  // The office travels inside the handshake, so an answer can only ever land on the office that
-  // asked for it — two offices can never swap connections, even if both windows are open at once.
-  await env.DRIVE_KV.put(STATE(state), JSON.stringify({ orgId: caller.orgId, uid: caller.uid, officeId }), { expirationTtl: 600 })
+  // The office travels inside the handshake only so the closing page can name it; the connection
+  // itself is the one shared record, so every office becomes Connected together.
+  await storeOf(env).put(STATE(state), JSON.stringify({ orgId: caller.orgId, uid: caller.uid, officeId }), { expirationTtl: 600 })
   const redirect = new URL(GOOGLE_AUTH)
   redirect.searchParams.set('client_id', env.GOOGLE_CLIENT_ID)
   redirect.searchParams.set('redirect_uri', `${url.origin}/subaccounts/callback`)
@@ -450,15 +423,13 @@ async function handleConnect(env, request, url) {
 }
 
 async function handleCallback(env, request, url) {
+  const store = storeOf(env)
   const state = url.searchParams.get('state') || ''
   const code = url.searchParams.get('code') || ''
-  const kept = state ? await env.DRIVE_KV.get(STATE(state), 'json') : null
+  const kept = state ? await store.get(STATE(state), 'json') : null
   if (!kept || !kept.orgId) return text('That connect window has expired. Close it and press Connect Google Drive again.', 400)
-  await env.DRIVE_KV.delete(STATE(state))
+  await store.delete(STATE(state))
   if (!code) return text('Google did not send an answer back. Close this window and press Connect Google Drive again.', 400)
-
-  const officeId = String(kept.officeId || '')
-  const slots = slotsFor(kept.orgId, officeId)
 
   const exchanged = await fetch(GOOGLE_TOKEN, {
     method: 'POST',
@@ -478,10 +449,8 @@ async function handleCallback(env, request, url) {
     return text('Google sent no lasting key back. Close this window, then press Connect Google Drive again and allow access.', 400)
   }
 
-  // The key lands under THIS office's own name, or under the business-wide name when no office was
-  // named. One office's key is never written over another's, and the two never share a slot.
-  await env.DRIVE_KV.put(slots.key, refresh)
-  await env.DRIVE_KV.delete(slots.access)
+  await store.put(KEY(kept.orgId), refresh)
+  await store.delete(ACCESS(kept.orgId))
 
   let access = String(answer.access_token || '')
   let email = ''
@@ -492,22 +461,20 @@ async function handleCallback(env, request, url) {
     /* the address is a nicety; the connection still works without it */
   }
   const rootId = await findOrCreateFolder(access, ROOT_NAME, 'root')
-  await env.DRIVE_KV.put(slots.email, email)
-  await env.DRIVE_KV.put(slots.root, rootId)
+  await store.put(EMAIL(kept.orgId), email)
+  await store.put(ROOT(kept.orgId), rootId)
 
   return text(
     'Connected. This window can be closed — the app has already noticed.\n\n' +
       (email ? `Google account: ${email}\n` : '') +
-      (officeId
-        ? `Folder: ${ROOT_NAME} in this office's own Google account, with its six folders inside.`
-        : `Folder: ${ROOT_NAME} (one folder inside it for each sub account).`),
+      `Folder: ${ROOT_NAME} (one folder inside it for each office).` +
+      (kept.officeId ? `\nThis office is ready; every office shares this one connection.` : ''),
   )
 }
 
 /**
- * What this connection looks like. With an office id it answers about that office alone — its own
- * address, its own root — and never about another. With no office id it answers about the
- * business-wide account, exactly as before.
+ * What the connection looks like. With an office id it answers for that office — the same shared
+ * account, so the same email — and only a person who may act for that office may ask.
  */
 async function handleStatus(env, caller, url) {
   const officeId = url.searchParams.get('officeId') || ''
@@ -515,103 +482,66 @@ async function handleStatus(env, caller, url) {
   if (officeId) {
     const allowed = await mayUseOffice(env, caller, officeId)
     if (!allowed.ok) return allowed.problem
-    const slots = slotsFor(caller.orgId, officeId)
-    const key = await env.DRIVE_KV.get(slots.key)
-    if (!key) return problem(409, 'not connected')
-    const email = (await env.DRIVE_KV.get(slots.email)) || ''
-    let rootFolderId = (await env.DRIVE_KV.get(slots.root)) || ''
-    if (!rootFolderId) {
-      const token = await accessToken(env, caller.orgId, officeId)
-      rootFolderId = await findOrCreateFolder(token, ROOT_NAME, 'root')
-      await env.DRIVE_KV.put(slots.root, rootFolderId)
-    }
-    return json({ connected: Boolean(email && rootFolderId), email, rootFolderId, rootName: ROOT_NAME, officeId })
+  } else if (!caller.manages) {
+    return problem(403, 'Only an owner or an admin may see the Drive connection.')
   }
-  if (!caller.manages) return problem(403, 'Only an owner or an admin may see the Drive connection.')
-  const key = await env.DRIVE_KV.get(KEY(caller.orgId))
+  const store = storeOf(env)
+  const key = await store.get(KEY(caller.orgId))
   if (!key) return problem(409, 'not connected')
-  const email = (await env.DRIVE_KV.get(EMAIL(caller.orgId))) || ''
-  let rootFolderId = (await env.DRIVE_KV.get(ROOT(caller.orgId))) || ''
+  const email = (await store.get(EMAIL(caller.orgId))) || ''
+  let rootFolderId = (await store.get(ROOT(caller.orgId))) || ''
   if (!rootFolderId) {
-    // The folders were never made in this connection yet: make the root now, once.
-    const token = await accessToken(env, caller.orgId, '')
+    // The root was never made in this connection yet: make it now, once.
+    const token = await accessToken(env, caller.orgId)
     rootFolderId = await findOrCreateFolder(token, ROOT_NAME, 'root')
-    await env.DRIVE_KV.put(ROOT(caller.orgId), rootFolderId)
+    await store.put(ROOT(caller.orgId), rootFolderId)
   }
   return json({
     connected: Boolean(email && rootFolderId),
     email,
     rootFolderId,
     rootName: ROOT_NAME,
+    ...(officeId ? { officeId } : {}),
   })
 }
 
-/**
- * Drop one connection. With an office id only that office's own key is dropped — another office's
- * connection is not touched, and neither is the business-wide one. Nothing in the Google Drive is
- * deleted: the folders and every file in them stay exactly as they are, and reconnecting finds them.
- */
-async function handleDisconnect(env, caller, url) {
-  const officeId = url.searchParams.get('officeId') || ''
-  if (!caller.orgId) return problem(409, 'That login has no business yet.')
-  if (officeId) {
-    const allowed = await mayUseOffice(env, caller, officeId)
-    if (!allowed.ok) return allowed.problem
-    const slots = slotsFor(caller.orgId, officeId)
-    await env.DRIVE_KV.delete(slots.key)
-    await env.DRIVE_KV.delete(slots.access)
-    await env.DRIVE_KV.delete(slots.email)
-    await env.DRIVE_KV.delete(slots.root)
-    return json({ connected: false, officeId })
-  }
+/** Drop the connection. An owner or an admin alone, because it lets go for every office at once. */
+async function handleDisconnect(env, caller) {
   if (!caller.manages) return problem(403, 'Only an owner or an admin may disconnect the sub accounts’ Google Drive.')
-  await env.DRIVE_KV.delete(KEY(caller.orgId))
-  await env.DRIVE_KV.delete(ACCESS(caller.orgId))
-  await env.DRIVE_KV.delete(EMAIL(caller.orgId))
-  await env.DRIVE_KV.delete(ROOT(caller.orgId))
+  if (!caller.orgId) return problem(409, 'That login has no business yet.')
+  const store = storeOf(env)
+  await store.delete(KEY(caller.orgId))
+  await store.delete(ACCESS(caller.orgId))
+  await store.delete(EMAIL(caller.orgId))
+  await store.delete(ROOT(caller.orgId))
+  // Nothing in the Google Drive is deleted: the folders and every file in them stay exactly as they
+  // are, and reconnecting finds them again.
   return json({ connected: false })
 }
 
 /**
- * Make this sub account's six folders, and answer with their ids. When that office has its own
- * connection, the six go into that office's own account, straight inside its "LS Invoice Files",
- * and any that are already there are found rather than made again — so connecting twice, or
- * renaming the office, never leaves a duplicate set. An office with no connection of its own keeps
- * the old behaviour: its folders are made in the business-wide account, exactly as before.
+ * Make one office's six folders, and answer with their ids. An owner or an admin may do it for any
+ * office; a member of an office may do it for their own, so the office that pressed Connect gets
+ * its folders without waiting for an admin. A set that is already there is found, never made again.
  */
 async function handleFolders(env, caller, request) {
   const body = await request.json().catch(() => ({}))
   const officeId = String(body.officeId || '')
   const name = String(body.name || '')
-  if (!officeId) return problem(400, 'A sub account is needed.')
+  if (!officeId || !name) return problem(400, 'A sub account and its name are needed.')
   if (!caller.orgId) return problem(409, 'That login has no business yet.')
+  const allowed = await mayUseOffice(env, caller, officeId)
+  if (!allowed.ok) return allowed.problem
 
-  const own = await env.DRIVE_KV.get(slotsFor(caller.orgId, officeId).key)
-  if (own) {
-    const allowed = await mayUseOffice(env, caller, officeId)
-    if (!allowed.ok) return allowed.problem
-    const slots = slotsFor(caller.orgId, officeId)
-    const token = await accessToken(env, caller.orgId, officeId)
-    let root = (await env.DRIVE_KV.get(slots.root)) || ''
-    if (!root) {
-      root = await findOrCreateFolder(token, ROOT_NAME, 'root')
-      await env.DRIVE_KV.put(slots.root, root)
-    }
-    const made = await officeFolderSetFor(token, root)
-    return json({ root: made.root, folders: made.folders, name, officeId })
-  }
-
-  // The business-wide account, exactly as before phase 54.
-  if (!caller.manages) return problem(403, 'Only an owner or an admin may make a sub account’s folders.')
-  if (!name) return problem(400, 'A sub account and its name are needed.')
-  const rootId = await env.DRIVE_KV.get(ROOT(caller.orgId))
-  if (!(await env.DRIVE_KV.get(KEY(caller.orgId)))) return problem(409, 'not connected')
-  const token = await accessToken(env, caller.orgId, '')
+  const store = storeOf(env)
+  const rootId = await store.get(ROOT(caller.orgId))
+  if (!(await store.get(KEY(caller.orgId)))) return problem(409, 'not connected')
+  const token = await accessToken(env, caller.orgId)
   const root = rootId || (await findOrCreateFolder(token, ROOT_NAME, 'root'))
-  if (!rootId) await env.DRIVE_KV.put(ROOT(caller.orgId), root)
-  // The name the app sends is already "Lagos (LOS)", built from the sub account and its prefix.
+  if (!rootId) await store.put(ROOT(caller.orgId), root)
+  // The name the app sends is already "Lagos (LOS)", built from the office and its prefix.
   const made = await folderSetFor(token, root, name)
-  return json({ root: made.root, folders: made.folders, name })
+  return json({ root: made.root, folders: made.folders, name, officeId })
 }
 
 async function handleLookup(env, caller, request) {
@@ -621,15 +551,14 @@ async function handleLookup(env, caller, request) {
   const name = String(body.name || '')
   if (!officeId || !folder || !name) return problem(400, 'A sub account, a folder and a file name are needed.')
   if (!mayWriteFor(caller, officeId)) return problem(403, 'That record belongs to another sub account.')
+  const allowed = await mayUseOffice(env, caller, officeId)
+  if (!allowed.ok) return allowed.problem
   const where = await folderIdOf(env, caller.idToken, officeId, folder)
-  if (where.missing) return problem(409, 'That sub account has no Drive folders yet.')
-  if (!where.id) return problem(409, 'That sub account has no Drive folders yet.')
+  if (where.missing || !where.id) return problem(409, 'That sub account has no Drive folders yet.')
   if (where.orgId && caller.orgId && where.orgId !== caller.orgId) {
     return problem(403, 'That sub account belongs to another business.')
   }
-  // PHASE 54: this office's own key when it has one, so the folder id is looked up in the very
-  // account the file was put in. Never another office's account.
-  const token = await accessToken(env, caller.orgId || '', officeId)
+  const token = await accessToken(env, caller.orgId || '')
   const quoted = name.replace(/\\/g, '\\\\').replace(/'/g, "\\'")
   const found = await driveGet(token, '/files', {
     q: `name = '${quoted}' and '${where.id}' in parents and trashed = false`,
@@ -650,14 +579,20 @@ async function handleUpload(env, caller, request, url) {
   if (!FOLDER_NAMES[folder]) return problem(400, `There is no folder called "${folder}".`)
   if (!name) return problem(400, 'A file name is needed.')
   if (!mayWriteFor(caller, officeId)) return problem(403, 'That record belongs to another sub account.')
+  const allowed = await mayUseOffice(env, caller, officeId)
+  if (!allowed.ok) return allowed.problem
 
+  // The folder id comes from THIS office's own driveFolders/{officeId} document, read with the
+  // caller's token, so a file can only ever land in a folder that belongs to the office named.
   const where = await folderIdOf(env, caller.idToken, officeId, folder)
   if (where.missing || !where.id) return problem(409, 'That sub account has no Drive folders yet.')
+  if (where.orgId && caller.orgId && where.orgId !== caller.orgId) {
+    return problem(403, 'That sub account belongs to another business.')
+  }
 
   const bytes = await request.arrayBuffer()
   if (bytes.byteLength > 20 * 1024 * 1024) return problem(413, 'File too large (max 20 MB)')
-  // THIS office's own key when it has one: an office's key is used only for that office's uploads.
-  const token = await accessToken(env, caller.orgId || '', officeId)
+  const token = await accessToken(env, caller.orgId || '')
   const made = await uploadBytes(token, where.id, name, mimeType, bytes)
   return json({ ...made, officeId, folder })
 }
@@ -672,20 +607,18 @@ export default {
     try {
       // A quick answer at the Worker's own address, so opening it in a browser says it is running.
       if (path === '/') {
-        return json({ keyKeeper: 'LS Invoice', phase: 54, officeScoped: true }, 200, headers)
+        return json({ keyKeeper: 'LS Invoice', phase: 54, sharedAccount: true }, 200, headers)
       }
 
       // The one route Google itself calls back on. No sign-in header is possible here.
-      if (path === '/subaccounts/callback' || path === '/callback') {
-        return await handleCallback(env, request, url)
-      }
+      if (path === '/subaccounts/callback') return await handleCallback(env, request, url)
 
-      // Opened as a window by the app: it carries the person's own sign-in token, and the office id.
-      if (path === '/connect-subaccounts' || path === '/connect') {
+      if (path === '/connect-subaccounts') {
+        // Opened as a window by the app: it carries the person's own sign-in token.
         return await handleConnect(env, request, url)
       }
 
-      const open = ['/subaccounts/status', '/subaccounts/disconnect', '/subaccounts/folders', '/subaccounts/lookup', '/upload', '/token', '/disconnect']
+      const open = ['/subaccounts/status', '/subaccounts/disconnect', '/subaccounts/folders', '/subaccounts/lookup', '/upload']
       if (!open.includes(path)) {
         return json({ error: 'There is nothing at that address.' }, 404, headers)
       }
@@ -697,8 +630,8 @@ export default {
       }
 
       let answer
-      if (path === '/subaccounts/status' || path === '/token') answer = await handleStatus(env, caller, url)
-      else if (path === '/subaccounts/disconnect' || path === '/disconnect') answer = await handleDisconnect(env, caller, url)
+      if (path === '/subaccounts/status') answer = await handleStatus(env, caller, url)
+      else if (path === '/subaccounts/disconnect') answer = await handleDisconnect(env, caller)
       else if (path === '/subaccounts/folders') answer = await handleFolders(env, caller, request)
       else if (path === '/subaccounts/lookup') answer = await handleLookup(env, caller, request)
       else answer = await handleUpload(env, caller, request, url)
@@ -709,7 +642,7 @@ export default {
       const message = String((cause && cause.message) || cause)
       // "not connected" is a wait, not a fault: the app shows it and keeps the record.
       if (message === 'not-connected') {
-        return json({ error: 'This Google Drive is not connected yet.' }, 409, headers)
+        return json({ error: 'The sub accounts’ Google Drive is not connected yet.' }, 409, headers)
       }
       return json({ error: `The key keeper could not finish: ${message.slice(0, 300)}` }, 500, headers)
     }

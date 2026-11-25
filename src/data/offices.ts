@@ -38,7 +38,7 @@ import { newId, nowIso } from '../lib/id'
 import { firebaseAuth, firestoreDb } from '../lib/firebase'
 import { writeAudit } from './audit'
 import { readSettings } from './settings'
-import { ensureSubFolders, loadOfficeConnection } from './driveShared'
+import { SUB_FOLDER_KEYS, ensureSubFolders, loadSharedConnection, loadSubFolders } from './driveShared'
 
 export const OFFICES_COLLECTION = 'offices'
 
@@ -518,9 +518,15 @@ export function createOffice(input: OfficeInput, actor: { email?: string; orgId?
 async function makeFoldersFor(office: Office): Promise<void> {
   if (!office.id) return
   try {
-    // PHASE 54: this office's OWN connection, so its folders go into its own Google account.
-    const connection = await loadOfficeConnection(office.orgId, office.id)
+    // PHASE 54: every office shares ONE Google account, so that one connection decides. What is per
+    // office is its own folder set, saved under the office's ID.
+    const connection = await loadSharedConnection(office.orgId)
     if (!connection) return
+    // A set that is already there is left exactly as it is. That is what makes a rename, a second
+    // save or a reconnect unable to leave a duplicate set behind: the folders are found by the
+    // office's ID, never by the office's name, so renaming cannot fork a second set either.
+    const done = await loadSubFolders(office.id)
+    if (done && done.root && SUB_FOLDER_KEYS.every((key) => done.folders[key])) return
     await ensureSubFolders({ id: office.id, orgId: office.orgId, name: office.name, prefix: office.prefix })
   } catch {
     /* the Drive is not reachable just now: Storage link shows this sub account as waiting */
