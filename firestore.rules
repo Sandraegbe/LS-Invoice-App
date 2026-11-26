@@ -151,6 +151,8 @@ service cloud.firestore {
         && request.resource.data.role == 'staff'
         && request.resource.data.disabled == false
         && get(/databases/$(database)/documents/invites/$(myEmail())).data.status == 'pending'
+        && (get(/databases/$(database)/documents/invites/$(myEmail())).data.get('expiresAt', null) == null
+            || request.time < get(/databases/$(database)/documents/invites/$(myEmail())).data.get('expiresAt', null))
         && request.resource.data.get('officeId', '') == get(/databases/$(database)/documents/invites/$(myEmail())).data.get('officeId', '')
         && request.resource.data.permissions == get(/databases/$(database)/documents/invites/$(myEmail())).data.permissions
         && request.resource.data.orgId == get(/databases/$(database)/documents/invites/$(myEmail())).data.orgId
@@ -174,14 +176,16 @@ service cloud.firestore {
         && request.resource.data.orgId == resource.data.orgId
         && request.resource.data.email == resource.data.email
         && request.resource.data.role in ['admin', 'staff']
-        && (request.resource.data.role == resource.data.role || isOwner())
+        && (request.resource.data.role == resource.data.role
+            || (isAdminHere() && uid != get(/databases/$(database)/documents/ownership/main).data.ownerUid))
         && request.resource.data.get('officeId', '') is string
         && onlyPermissions(request.resource.data.permissions);
 
       allow delete: if managesStaff()
         && request.auth.uid != uid
         && resource.data.orgId == currentUser().orgId
-        && (resource.data.role != 'admin' || isOwner());
+        && (resource.data.role != 'admin'
+            || (isAdminHere() && uid != get(/databases/$(database)/documents/ownership/main).data.ownerUid));
 
       // Unfinished work, private to the person.
       match /drafts/{form} {
@@ -263,7 +267,8 @@ service cloud.firestore {
 
     // offices (sub accounts)
     match /offices/{officeId} {
-      allow read: if signedIn() && sameOrg(resource.data.orgId);
+      allow read: if signedIn() && sameOrg(resource.data.orgId)
+        && (isAdminHere() || managesStaff() || (officeId == myOffice() && officeId != ''));
 
       allow create: if managesStaff()
         && request.resource.data.orgId == currentUser().orgId
@@ -338,7 +343,8 @@ service cloud.firestore {
       allow read: if managesStaff() && sameOrg(resource.data.orgId)
         && sameOffice(resource.data.get('officeId', ''));
 
-      allow update, delete: if false;
+      allow update: if false;
+      allow delete: if isAdminHere() && sameOrg(resource.data.orgId);
     }
 
     // each admin's own Reports layout
@@ -363,7 +369,7 @@ service cloud.firestore {
 
     // the business's own letterhead
     match /settings/{document} {
-      allow read: if signedIn() && sameOrg(resource.data.orgId);
+      allow read: if signedIn() && sameOrg(resource.data.orgId) && document != 'drive';
       allow create, update: if signedIn()
         && !isDisabled()
         && isAdminHere()
@@ -384,7 +390,7 @@ service cloud.firestore {
 
     // the Google Drive connection (no token is ever stored here)
     match /settings/drive {
-      allow read: if signedIn() && sameOrg(resource.data.orgId);
+      allow read: if isAdminHere() && sameOrg(resource.data.orgId);
 
       allow create, update: if isAdmin()
         && !isDisabled()
@@ -791,6 +797,25 @@ service cloud.firestore {
         && request.resource.data.keys().hasOnly(['name', 'active', 'orgId', 'updatedAt']);
 
       allow delete: if false;
+    }
+
+    // people who signed in but have no invite yet ask the admin for access
+    match /accessRequests/{requestId} {
+      allow read: if signedIn() && (requestId == myEmail() || managesStaff());
+      allow create: if signedIn()
+        && requestId == myEmail()
+        && request.resource.data.email == requestId
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.status == 'waiting'
+        && request.resource.data.keys().hasOnly(['email', 'uid', 'name', 'status', 'requestedAt']);
+      allow update: if signedIn()
+        && requestId == myEmail()
+        && resource.data.status == 'waiting'
+        && request.resource.data.email == requestId
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.status == 'waiting'
+        && request.resource.data.keys().hasOnly(['email', 'uid', 'name', 'status', 'requestedAt']);
+      allow delete: if managesStaff();
     }
 
     // everything else is closed
