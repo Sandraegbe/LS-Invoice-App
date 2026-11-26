@@ -126,7 +126,7 @@ export function SharedDriveCard({
           )
         }
         setMessage(
-          `Connected as ${next.email}. Every office uses this one Google account; this office’s folders are ready${
+          `Connected as ${next.email}. Every office uses this one Google account; this office’s own folder — named only with its invoice code — and its six folders are ready${
             made > 0 ? `, and ${made} other ${made === 1 ? 'office' : 'offices'} got theirs` : ''
           }.`,
         )
@@ -136,7 +136,7 @@ export function SharedDriveCard({
       const next = await connectSharedDrive(orgId)
       setConnection(next)
       setMessage(
-        `Connected as ${next.email}. “LS Invoice Files” is in that Google account, with one folder for each office.`,
+        `Connected as ${next.email}. “LS Invoice Files” is that account’s own folder; each office has a folder of its own, named only with its invoice code.`,
       )
       // Folders are made automatically after Connect, so there is no Create folders button to press.
       for (const office of listOffices(orgId)) {
@@ -214,14 +214,14 @@ export function SharedDriveCard({
    */
   const line = inside
     ? connection
-      ? `Connected as ${connection.email} · this office’s folders only, inside that one shared account${
+      ? `Connected as ${connection.email} · this office’s own folder only, named with its invoice code, inside that one shared account${
           connection.connectedAt
             ? ` · connected ${new Date(connection.connectedAt).toLocaleDateString('en-GB').replace(/\//g, '-')}`
             : ''
         }`
       : 'Not connected yet. Until it is, this office’s records and files wait here — nothing is lost and nothing is marked Failed.'
     : connection
-      ? `Connected as ${connection.email} · every office has its own folder set in “LS Invoice Files”${
+      ? `Connected as ${connection.email} · each office has a folder of its own, named only with its invoice code${
           connection.connectedAt
             ? ` · connected ${new Date(connection.connectedAt).toLocaleDateString('en-GB').replace(/\//g, '-')}`
             : ''

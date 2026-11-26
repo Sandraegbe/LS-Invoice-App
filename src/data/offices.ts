@@ -357,7 +357,7 @@ export function prefixProblem(prefix: string, exceptId = ''): string | null {
   const clean = cleanPrefix(prefix)
   if (!clean) return 'Give this sub account an invoice prefix — one or two letters, such as AJ.'
   const taken = readAll().some((office) => office.id !== exceptId && cleanPrefix(office.prefix) === clean)
-  if (taken) return `Another sub account already uses ${clean}. Pick different letters.`
+  if (taken) return 'That code is already used by another office.'
   return null
 }
 

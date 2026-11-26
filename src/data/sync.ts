@@ -21,8 +21,8 @@
 
 import { dropPending, putPending, readPending } from '../lib/blobstore'
 import { DriveError, MAX_FILE_BYTES, TOO_LARGE_MESSAGE, plainReason, uploadToDrive, type FolderKey } from './drive'
-import { SharedDriveError, findSharedFile, sharedReadiness } from './driveShared'
-import { officeOfRecord, writingOffice } from './offices'
+import { SharedDriveError, SUB_FOLDER_KEYS, ensureSubFolders, findSharedFile, loadSubFolders, sharedReadiness } from './driveShared'
+import { findOffice, officeOfRecord, writingOffice } from './offices'
 import { writeAudit } from './audit'
 import { listInvoices, setDriveSyncStatus, type DriveSyncStatus } from './invoices'
 
@@ -781,9 +781,31 @@ export interface SyncNowResult {
   reason: string
 }
 
+/**
+ * PHASE 56 — this office's own Drive folder, made now if it has none. Used by "Sync now" so that one
+ * press is enough to get LOS / PH / ABJ and its six folders. A failure here is a wait, not a fault:
+ * every record stays queued and the card says plainly that it is still waiting.
+ */
+async function ensureOfficeFolderNow(officeId: string): Promise<void> {
+  if (!officeId) return
+  try {
+    const kept = await loadSubFolders(officeId)
+    if (kept && kept.root && SUB_FOLDER_KEYS.every((key) => kept.folders[key])) return
+    const office = findOffice(officeId)
+    if (!office) return
+    await ensureSubFolders({ id: office.id, orgId: office.orgId, name: office.name, prefix: office.prefix })
+  } catch {
+    /* the Drive is not reachable just now: nothing is lost, and Sync now can be pressed again */
+  }
+}
+
 export async function syncNowForOffice(officeId: string): Promise<SyncNowResult> {
   const mineNow = () => readQueue().filter((job) => officeIdOfJob(job) === officeId)
   const sentBefore = mineNow().filter((job) => job.status === 'synced').length
+  // PHASE 56 — "Sync now" makes this office's OWN folder first, if it has none yet: a folder at the
+  // top of the account named only with its invoice code, holding the six folders. Repeating it uses
+  // the ids already saved, so a second press cannot make a second folder.
+  await ensureOfficeFolderNow(officeId)
   const ready = await sharedReadiness(officeId)
   if (!ready.ready) {
     return { sent: 0, waiting: mineNow().filter((job) => job.status !== 'synced').length, reason: ready.reason }

@@ -1,28 +1,33 @@
 /**
- * THE SUB ACCOUNTS' SHARED GOOGLE ACCOUNT (phase 41)
+ * THE SUB ACCOUNTS' FOLDERS IN THE BUSINESS'S GOOGLE ACCOUNT (phase 56)
  *
  * Every sub account's files live in ONE Google account of the business's own — connected once by
  * the owner or an admin through the existing key keeper (the Cloudflare Worker at
- * VITE_DRIVE_WORKER_URL). Inside it each sub account gets its own folders, and nothing in one sub
- * account is ever pointed at another's.
+ * VITE_DRIVE_WORKER_URL). Each sub account gets its OWN folder, straight at the top of that account
+ * and named only with its invoice code ("LOS", "PH", "ABJ"), holding the six folders. Nothing goes
+ * inside "LS Invoice Files" any more, and nothing in one sub account is ever pointed at another's.
  *
  * Two Firestore documents hold what the app needs to know, and neither holds a secret:
  *
  *   driveConnections/subAccounts        one document, the connection itself
  *     orgId          string   the business
  *     email          string   the Google account's own address (shown to owners and admins only)
- *     rootFolderId   string   the "LS Invoice Files" folder in that account
+ *     rootFolderId   string   the "LS Invoice Files" folder in that account — the business's own
+ *                             folder, used by the "All offices" and "No office yet" cards
  *     connectedAt    string   when it was connected
  *     updatedAt      time     written by Firestore itself
  *
  *   driveFolders/{subAccountId}         one document per sub account, its own folder ids
  *     orgId          string
  *     officeId       string   the sub account's id — the document id too
- *     name           string   "[sub account name] ([prefix])", e.g. "Lagos (LOS)"
- *     root           string   that sub account's folder inside the shared root
+ *     name           string   the invoice code the folder is named with, e.g. "LOS"
+ *     root           string   that sub account's own folder, at the top of the account
  *     folders        map      incomingInvoices, clients, images, videos, urls, deliveryNotes
  *     createdAt      string
  *     updatedAt      time
+ *
+ * Once those ids are saved they are what is used: the folder is never looked up by its name again
+ * for that sub account, so renaming an office cannot fork a second set of folders.
  *
  * No key, token or password is ever written here, to the device or to a log. Every upload is sent
  * to the Worker with the caller's own app sign-in token as proof of who is asking; the Worker
@@ -109,11 +114,14 @@ const NOT_SET_UP =
   `The sub accounts' Google Drive needs its key keeper: put the Worker's address in app/.env as ` +
   `VITE_DRIVE_WORKER_URL. The site is ${currentSiteUrl()}.`
 
-/** "Lagos (LOS)" — the sub account's own name and prefix, exactly as the person asked for. */
-export function officeFolderName(name: string, prefix: string): string {
-  const clean = name.trim()
-  const letters = prefix.trim().toUpperCase()
-  return letters ? `${clean} (${letters})` : clean
+/**
+ * PHASE 56 — the office's own Drive folder, named ONLY with its invoice code: "LOS", "PH", "ABJ".
+ *
+ * The office's name is never in it, so a rename needs no rename in Google Drive at all, and two
+ * offices sharing one Google account can never be mistaken for each other.
+ */
+export function officeFolderName(prefix: string): string {
+  return prefix.trim().toUpperCase().replace(/[^A-Z]/g, '')
 }
 
 /** The Drive page for one folder, so an owner or admin can open it. Never shown to a sub user. */
@@ -556,9 +564,11 @@ export async function connectMissingOfficeFolders(
 /* ---------------------------------------------------------------- the folders of one sub account */
 
 /**
- * Make (or find) one sub account's folder set: "[name] ([prefix])" inside the shared root, holding
- * the six folders. Called straight after a sub account is saved, and from the Create folders
- * button. Repeating it never makes a second set — the Worker reuses what is there.
+ * PHASE 56 — make, or reuse, ONE sub account's own folder: a folder at the top of the Google account
+ * named only with the office's invoice code ("LOS"), holding the six folders and nothing else. Called
+ * straight after a sub account is saved, from the Create folders button, and from Sync now when the
+ * folder is missing. Repeating it never makes a second set: after the first time the Worker uses the
+ * ids it has already saved for this office, never the folder's name.
  */
 export async function ensureSubFolders(office: {
   id: string
@@ -567,11 +577,14 @@ export async function ensureSubFolders(office: {
   prefix: string
 }): Promise<SubFolders> {
   if (!office.id) throw new SharedDriveError('That sub account has no id yet.', 'other')
-  const name = officeFolderName(office.name, office.prefix)
+  const name = officeFolderName(office.prefix)
+  if (!name) throw new SharedDriveError('Give this sub account an invoice code first.', 'other')
   const response = await callWorker('/subaccounts/folders', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ officeId: office.id, name }),
+    // The office's id says whose folder it is; its code says what the folder is called. Its name is
+    // never sent, so nothing in Google Drive can be named after an office.
+    body: JSON.stringify({ officeId: office.id, prefix: name }),
   })
   if (!response.ok) throw await workerProblem(response, 'The folders could not be made yet.')
   const answer = (await response.json()) as { root?: string; folders?: Record<string, string> }
@@ -587,7 +600,66 @@ export async function ensureSubFolders(office: {
     throw new SharedDriveError('The key keeper answered without every folder. Press Create folders again.', 'other')
   }
   await saveSubFolders(doc)
+  await saveOfficeConnection(doc)
   return doc
+}
+
+/**
+ * PHASE 56 — the office's own connection record keeps the root id beside its folders. Best effort on
+ * purpose: the folder set just saved is what every upload reads, so a refusal here changes nothing.
+ * The Google Drive card on "All offices" and "No office yet" still reads the one shared record, as
+ * it always has.
+ */
+async function saveOfficeConnection(doc: SubFolders): Promise<void> {
+  try {
+    const connection = await loadSharedConnection(doc.orgId)
+    const email = connection?.email ?? ''
+    if (!email) return
+    const db = await firestoreDb()
+    if (!db) return
+    const { doc: reference, setDoc, serverTimestamp } = await import('firebase/firestore')
+    await setDoc(
+      reference(db, CONNECTION_COLLECTION, doc.officeId),
+      {
+        orgId: doc.orgId,
+        officeId: doc.officeId,
+        email,
+        rootFolderId: doc.root,
+        connectedAt: connection?.connectedAt || doc.createdAt,
+        updatedAt: serverTimestamp(),
+      },
+      { merge: true },
+    )
+  } catch {
+    /* the folders are saved; this one extra record is a nicety */
+  }
+}
+
+/**
+ * PHASE 56 — that office's invoice code changed, so its own Drive folder is renamed to the new code,
+ * BY THE ID ALREADY SAVED. Owners and admins only (the Worker refuses everyone else). Never waited
+ * for: a rename that fails is ignored, and the office goes on working with the folder it has.
+ */
+export async function renameOfficeFolder(office: {
+  id: string
+  orgId: string
+  prefix: string
+}): Promise<boolean> {
+  const prefix = officeFolderName(office.prefix)
+  if (!office.id || !prefix) return false
+  try {
+    const response = await callWorker('/subaccounts/rename', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ officeId: office.id, prefix }),
+    })
+    if (!response.ok) return false
+    const answer = (await response.json()) as { renamed?: boolean }
+    return answer.renamed === true
+  } catch {
+    // Ignored silently on purpose: the folder keeps the name it had.
+    return false
+  }
 }
 
 /* ------------------------------------------------------------------ sending one file or record */

@@ -1,5 +1,5 @@
 /**
- * LS INVOICE — THE KEY KEEPER (Cloudflare Worker), phase 54.
+ * LS INVOICE — THE KEY KEEPER (Cloudflare Worker), phase 56.
  *
  * WHAT IT IS FOR
  * Everything the app saves that belongs in a Google Drive — the Clients records, the pictures and
@@ -7,24 +7,39 @@
  * puts it in the right sub account's folder. No Google key, token or password ever reaches a
  * browser, and no member of staff signs in to Google at all.
  *
- * PHASE 54 — ONE GOOGLE ACCOUNT FOR ALL THE OFFICES, ONE FOLDER SET EACH
- * Lagos, PH and any office added later all use the SAME Google account, connected once for the
- * whole business. Inside it there is one root folder, "LS Invoice Files", and inside that one folder
- * per office, named "[office name] ([prefix])" — e.g. "Lagos (LOS)" — each holding six folders:
+ * PHASE 56 — ONE FOLDER FOR EACH OFFICE, NAMED ONLY WITH ITS INVOICE CODE
+ * Lagos, PH, Abuja and any office added later each get ONE folder of their own, straight at the top
+ * level of the Google account in use — never inside a folder called "LS Invoice Files", and never
+ * named with the office's name. The folder is named only with the office's invoice code:
+ *
+ *     LOS · PH · ABJ
+ *
+ * and inside it exactly the six folders, and nothing else:
  *
  *     Incoming Invoices · Clients · Images · Videos · URLs · Delivery Notes
  *
- * The ids of an office's six folders live in driveFolders/{officeId}, whose document id is the
- * office's ID and never its name. So renaming an office changes nothing here, and a rename can
- * never fork a second set of folders. Every folder is made by looking first and creating only what
- * is missing, so reconnecting — or renaming — never leaves a duplicate behind.
+ * Two offices on the same Google account therefore sit side by side, each with its own six folders,
+ * and no office can ever land in another's.
+ *
+ * The ids of an office's folder and of its six folders are saved twice: in this Worker's own KV
+ * record for that office, offices:folder:<orgId>:<officeId>, and in the app's driveFolders/{officeId}
+ * document, whose document id is the office's ID and never its name. After the first time the saved
+ * ids are used for ever: the folder is never looked up by name again for that office, so renaming an
+ * office cannot fork a second set, and a second press of Connect cannot make a second folder.
+ *
+ * PHASE 56 — WHAT HAPPENS TO WHAT IS ALREADY THERE
+ * A folder set made by the earlier build (the "[office name] ([code])" folders inside "LS Invoice
+ * Files") is left exactly where it is, with every file in it: nothing is moved, renamed or deleted.
+ * Its saved ids are used as they are. Only an office with no saved folder gets the new one, and only
+ * a changed invoice code renames a folder — by its saved id, never by its name.
  *
  * What did NOT change, on purpose:
  *   · The KV names, exactly as they were: subaccounts:key / access / email / root / state. Any
  *     business that is already connected stays connected; nobody has to connect again.
  *   · The routes, exactly as they were: /subaccounts/status, /subaccounts/folders,
  *     /subaccounts/lookup, /subaccounts/disconnect, /subaccounts/callback, /connect-subaccounts and
- *     /upload. A plain "/" now answers a health line, so opening the Worker says it is running.
+ *     /upload. A plain "/" answers a health line, so opening the Worker says it is running. ONE route
+ *     is new: /subaccounts/rename, for a changed invoice code, owners and admins only.
  *   · The key the Worker already kept per login — the admin's own Drive — is left exactly as it is:
  *     this file never reads, writes or deletes it, so nothing that worked before is disturbed.
  *   · The bindings and secrets: the same KV namespace and GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET.
@@ -47,6 +62,8 @@
  *   · STATUS AND FOLDERS IN ONE OFFICE — the same rule again, so an office can see the connection
  *     and make its own folders without being an admin.
  *   · DISCONNECT — an owner or an admin alone, because it lets go for every office at once.
+ *   · RENAME ONE OFFICE'S FOLDER — an owner or an admin alone, by the id already saved, and only
+ *     when that office's invoice code changes. A failure is ignored silently: the office works on.
  *   · A sub account's records are routed by its id, never by the letters in an invoice number.
  *
  * WHAT IT KEEPS (all in the same KV namespace the Worker already uses)
@@ -55,7 +72,9 @@
  *   · subaccounts:key:<orgId>      the sub accounts' Google account, once for the whole business.
  *   · subaccounts:access:<orgId>   a short-lived access token, so Google is not asked every time.
  *   · subaccounts:email:<orgId>    the address that was connected, for the card to show.
- *   · subaccounts:root:<orgId>     the id of the "LS Invoice Files" folder in that account.
+ *   · subaccounts:root:<orgId>     the id of the "LS Invoice Files" folder in that account — the
+ *     business's own folder, used by the "All offices" and "No office yet" cards and nothing else.
+ *   · offices:folder:<orgId>:<officeId>  one office's own folder id and the ids of its six folders.
  *   · subaccounts:state:<random>   the ten-minute handshake while a person is on Google's page.
  * No key is ever returned to a browser, and none is written into Firestore.
  *
@@ -78,9 +97,10 @@
  *    /subaccounts/callback redirect address are used.
  * 9. In the app, open Settings → Storage link. In "All offices" press Connect once, and sign in with
  *    the account every office shares; or press Connect inside any office — Lagos, PH — and it is the
- *    same single connection, so every office shows Connected afterwards. The six folders of the
- *    office that pressed it are made straight away, and an owner's or an admin's device also makes
- *    the six for any office that has none yet.
+ *    same single connection, so every office shows Connected afterwards. That office's own folder is
+ *    made straight away, at the top of the account and named only with its invoice code (LOS, PH,
+ *    ABJ), with the six folders inside it; an owner's or an admin's device makes them for any office
+ *    that has none yet. A folder made by an earlier version is reused where it sits, never moved.
  * 10. That is all. Every office then sees its own folder set, its own records and its own counts.
  *
  * IF SOMETHING IS NOT RIGHT
@@ -114,6 +134,11 @@ const KEY = (orgId) => `subaccounts:key:${orgId}`
 const ACCESS = (orgId) => `subaccounts:access:${orgId}`
 const EMAIL = (orgId) => `subaccounts:email:${orgId}`
 const ROOT = (orgId) => `subaccounts:root:${orgId}`
+/**
+ * PHASE 56 — one office's own folder ids, in this same namespace. The org and the office id are both
+ * in the name, so two businesses, or two offices of one business, can never share a record.
+ */
+const OFFICE_FOLDER = (orgId, officeId) => `offices:folder:${orgId}:${officeId}`
 const STATE = (state) => `subaccounts:state:${state}`
 
 /**
@@ -348,14 +373,81 @@ async function findOrCreateFolder(token, name, parentId) {
   return String(answer.id)
 }
 
-/** Every one of the six folders inside one sub account's folder, making whatever is missing. */
-async function folderSetFor(token, rootId, name) {
-  const parent = await findOrCreateFolder(token, name, rootId)
+/** The office's invoice code as a Drive folder name: letters only, in capitals — LOS, PH, ABJ. */
+function codeOf(raw) {
+  return String(raw || '')
+    .toUpperCase()
+    .replace(/[^A-Z]/g, '')
+    .slice(0, 6)
+}
+
+/**
+ * The invoice code this request names. The app sends it on its own; a request from an older build
+ * sends only the folder name it used to use — "[office name] ([code])" — so the code is read out of
+ * that, and an office's folder can never be named with the office's name.
+ */
+function codeFromBody(body) {
+  const direct = codeOf(body && body.prefix)
+  if (direct) return direct
+  const name = String((body && body.name) || '')
+  const held = /\(([^)]+)\)\s*$/.exec(name)
+  return codeOf(held ? held[1] : '')
+}
+
+/**
+ * PHASE 56 — THE IDS THIS OFFICE ALREADY HAS, and nothing else. This Worker's own KV record comes
+ * first; then the app's driveFolders/{officeId} document, read with the caller's own token. Either
+ * one settles it: once a root id is saved it is used for ever, and the folder is never looked up by
+ * name again, so a rename can never leave an office with a second folder.
+ */
+async function keptOfficeFolders(env, caller, officeId) {
+  const store = storeOf(env)
+  let kept = null
+  try {
+    const row = await store.get(OFFICE_FOLDER(caller.orgId, officeId), 'json')
+    if (row && row.root) kept = row
+  } catch {
+    /* a KV miss is not a fault: the app's own document is asked next */
+  }
+  if (!kept) {
+    let doc = null
+    try {
+      doc = await readDoc(env, caller.idToken, `driveFolders/${officeId}`)
+    } catch {
+      doc = null
+    }
+    if (doc && doc.root) kept = { root: String(doc.root), folders: doc.folders || {}, prefix: '' }
+  }
+  const folders = {}
+  for (const key of Object.keys(FOLDER_NAMES)) {
+    folders[key] = kept && kept.folders ? String(kept.folders[key] || '') : ''
+  }
+  return {
+    root: kept ? String(kept.root || '') : '',
+    folders,
+    prefix: kept ? codeOf(kept.prefix) : '',
+  }
+}
+
+/** Keep the ids where the next press of Connect, and next month, finds them again. */
+async function saveOfficeFolders(env, caller, officeId, record) {
+  await storeOf(env).put(OFFICE_FOLDER(caller.orgId, officeId), JSON.stringify(record))
+}
+
+/**
+ * PHASE 56 — ONE FOLDER PER OFFICE, STRAIGHT AT THE TOP OF THE ACCOUNT, NAMED BY ITS CODE ALONE.
+ * The first time there is no saved root, so the folder is looked for by its code at the top level of
+ * the account and made only if it is missing. From then on the saved id is used and its name is
+ * never asked for again. Inside it, the six folders are reused by their saved ids and made only when
+ * one is missing. Nothing else is ever put inside it.
+ */
+async function officeFolderSet(token, prefix, kept) {
+  const root = kept.root || (await findOrCreateFolder(token, prefix, 'root'))
   const folders = {}
   for (const [key, folderName] of Object.entries(FOLDER_NAMES)) {
-    folders[key] = await findOrCreateFolder(token, folderName, parent)
+    folders[key] = kept.folders[key] || (await findOrCreateFolder(token, folderName, root))
   }
-  return { root: parent, folders }
+  return { root, folders }
 }
 
 /** The id of one sub account's folder of one kind, read from its own driveFolders document. */
@@ -460,15 +552,23 @@ async function handleCallback(env, request, url) {
   } catch {
     /* the address is a nicety; the connection still works without it */
   }
-  const rootId = await findOrCreateFolder(access, ROOT_NAME, 'root')
+  // PHASE 56: an office's own folder is made next, named by its code, at the top of the account. The
+  // business's own "LS Invoice Files" folder is made only for the "All offices" / "No office yet"
+  // cards, and only when one of those asks (see handleStatus) — never because an office connected.
+  let rootId = ''
+  if (!kept.officeId) {
+    rootId = await findOrCreateFolder(access, ROOT_NAME, 'root')
+    await store.put(ROOT(kept.orgId), rootId)
+  }
   await store.put(EMAIL(kept.orgId), email)
-  await store.put(ROOT(kept.orgId), rootId)
 
   return text(
     'Connected. This window can be closed — the app has already noticed.\n\n' +
       (email ? `Google account: ${email}\n` : '') +
-      `Folder: ${ROOT_NAME} (one folder inside it for each office).` +
-      (kept.officeId ? `\nThis office is ready; every office shares this one connection.` : ''),
+      (rootId
+        ? `Folder: ${ROOT_NAME} (the business's own folder).`
+        : `This office's folder is made next, named only with its invoice code (LOS, PH, ABJ).`) +
+      (kept.officeId ? `\nEvery office shares this one connection.` : ''),
   )
 }
 
@@ -520,28 +620,76 @@ async function handleDisconnect(env, caller) {
 }
 
 /**
- * Make one office's six folders, and answer with their ids. An owner or an admin may do it for any
- * office; a member of an office may do it for their own, so the office that pressed Connect gets
- * its folders without waiting for an admin. A set that is already there is found, never made again.
+ * PHASE 56 — make, or reuse, ONE office's own folder and its six folders.
+ *
+ * The folder is the office's alone: at the top level of the Google account, named only with the
+ * office's invoice code, never with the office's name and never inside "LS Invoice Files". Its id and
+ * the six folder ids are saved in this Worker's KV for that office and answered back, so the app can
+ * keep them in driveFolders/{officeId}. After the first time, those saved ids are all that is used.
+ *
+ * An owner or an admin may do it for any office; a member of an office may do it for their own, so
+ * the office that pressed Connect gets its folder without waiting for an admin.
  */
 async function handleFolders(env, caller, request) {
   const body = await request.json().catch(() => ({}))
   const officeId = String(body.officeId || '')
-  const name = String(body.name || '')
-  if (!officeId || !name) return problem(400, 'A sub account and its name are needed.')
+  const prefix = codeFromBody(body)
+  if (!officeId || !prefix) return problem(400, 'A sub account and its invoice code are needed.')
   if (!caller.orgId) return problem(409, 'That login has no business yet.')
   const allowed = await mayUseOffice(env, caller, officeId)
   if (!allowed.ok) return allowed.problem
+  if (!(await storeOf(env).get(KEY(caller.orgId)))) return problem(409, 'not connected')
 
-  const store = storeOf(env)
-  const rootId = await store.get(ROOT(caller.orgId))
-  if (!(await store.get(KEY(caller.orgId)))) return problem(409, 'not connected')
   const token = await accessToken(env, caller.orgId)
-  const root = rootId || (await findOrCreateFolder(token, ROOT_NAME, 'root'))
-  if (!rootId) await store.put(ROOT(caller.orgId), root)
-  // The name the app sends is already "Lagos (LOS)", built from the office and its prefix.
-  const made = await folderSetFor(token, root, name)
-  return json({ root: made.root, folders: made.folders, name, officeId })
+  const kept = await keptOfficeFolders(env, caller, officeId)
+  const made = await officeFolderSet(token, prefix, kept)
+  const record = { root: made.root, folders: made.folders, prefix, name: prefix, officeId }
+  await saveOfficeFolders(env, caller, officeId, record)
+  return json(record)
+}
+
+/**
+ * PHASE 56 — a new invoice code renames that office's own folder, BY ITS SAVED ID.
+ *
+ * Owners and admins only. Nothing is looked up by name and nothing is created, so a rename can only
+ * ever change the one folder; two offices on one Google account keep their own folders. A failure —
+ * no folder yet, Drive refusing, the key not renewed — is answered as "not renamed" and swallowed:
+ * a rename is a nicety, and the office goes on working with the folder it has.
+ */
+async function handleRename(env, caller, request) {
+  if (!caller.manages) return problem(403, 'Only an owner or an admin may rename an office’s Drive folder.')
+  const body = await request.json().catch(() => ({}))
+  const officeId = String(body.officeId || '')
+  const prefix = codeFromBody(body)
+  if (!officeId || !prefix) return problem(400, 'A sub account and its invoice code are needed.')
+  if (!caller.orgId) return problem(409, 'That login has no business yet.')
+  const kept = await keptOfficeFolders(env, caller, officeId)
+  if (!kept.root) return json({ renamed: false })
+  if (kept.prefix === prefix) return json({ renamed: true, name: prefix, root: kept.root })
+  try {
+    if (!(await storeOf(env).get(KEY(caller.orgId)))) return problem(409, 'not connected')
+    const token = await accessToken(env, caller.orgId)
+    const response = await fetch(
+      `${DRIVE}/files/${encodeURIComponent(kept.root)}?fields=id,name&supportsAllDrives=true`,
+      {
+        method: 'PATCH',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ name: prefix }),
+      },
+    )
+    if (!response.ok) return json({ renamed: false })
+    await saveOfficeFolders(env, caller, officeId, {
+      root: kept.root,
+      folders: kept.folders,
+      prefix,
+      name: prefix,
+      officeId,
+    })
+    return json({ renamed: true, name: prefix, root: kept.root })
+  } catch {
+    // Ignored on purpose: the folder keeps the name it had and the office carries on.
+    return json({ renamed: false })
+  }
 }
 
 async function handleLookup(env, caller, request) {
@@ -607,7 +755,7 @@ export default {
     try {
       // A quick answer at the Worker's own address, so opening it in a browser says it is running.
       if (path === '/') {
-        return json({ keyKeeper: 'LS Invoice', phase: 54, sharedAccount: true }, 200, headers)
+        return json({ keyKeeper: 'LS Invoice', phase: 56, oneFolderPerOffice: true }, 200, headers)
       }
 
       // The one route Google itself calls back on. No sign-in header is possible here.
@@ -618,7 +766,14 @@ export default {
         return await handleConnect(env, request, url)
       }
 
-      const open = ['/subaccounts/status', '/subaccounts/disconnect', '/subaccounts/folders', '/subaccounts/lookup', '/upload']
+      const open = [
+        '/subaccounts/status',
+        '/subaccounts/disconnect',
+        '/subaccounts/folders',
+        '/subaccounts/rename',
+        '/subaccounts/lookup',
+        '/upload',
+      ]
       if (!open.includes(path)) {
         return json({ error: 'There is nothing at that address.' }, 404, headers)
       }
@@ -633,6 +788,7 @@ export default {
       if (path === '/subaccounts/status') answer = await handleStatus(env, caller, url)
       else if (path === '/subaccounts/disconnect') answer = await handleDisconnect(env, caller)
       else if (path === '/subaccounts/folders') answer = await handleFolders(env, caller, request)
+      else if (path === '/subaccounts/rename') answer = await handleRename(env, caller, request)
       else if (path === '/subaccounts/lookup') answer = await handleLookup(env, caller, request)
       else answer = await handleUpload(env, caller, request, url)
 

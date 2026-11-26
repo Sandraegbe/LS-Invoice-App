@@ -455,7 +455,7 @@ service cloud.firestore {
     }
 
     // invoices
-    match /invoices/{invoiceId} {
+        match /invoices/{invoiceId} {
       allow read: if signedIn() && sameOrg(resource.data.orgId)
         && sameOffice(resource.data.get('officeId', ''));
 
@@ -474,9 +474,10 @@ service cloud.firestore {
         && request.resource.data.officeId is string
         && request.resource.data.createdBy is string
         && request.resource.data.payments is list
-        && (may('managePayments') || request.resource.data.payments.size() == 0);
+        && (may('managePayments') || request.resource.data.payments.size() == 0)
+        && request.resource.data.get('ownerSignature', null) == null;
 
-      // The raiser or an admin corrects an unsent invoice.
+      // The raiser or an admin corrects an unsent invoice. The signature is never touched here.
       allow update: if signedIn()
         && !isDisabled()
         && resource.data.orgId == currentUser().orgId
@@ -488,14 +489,31 @@ service cloud.firestore {
         && request.resource.data.orgId == resource.data.orgId
         && request.resource.data.createdBy == resource.data.createdBy
         && request.resource.data.lines is list
-        && request.resource.data.lines.size() > 0;
+        && request.resource.data.lines.size() > 0
+        && request.resource.data.get('ownerSignature', null) == resource.data.get('ownerSignature', null);
 
-      // Whoever manages payments records a payment. Only the money moves.
+      // The owner or an admin signs, signs again, or deletes the signature while no payment is recorded.
+      allow update: if signedIn()
+        && !isDisabled()
+        && isAdminHere()
+        && resource.data.orgId == currentUser().orgId
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['ownerSignature', 'updatedAt'])
+        && ((request.resource.data.get('ownerSignature', null) == null
+             && resource.data.get('payments', []).size() == 0)
+            || (request.resource.data.get('ownerSignature', null) != null
+                && request.resource.data.ownerSignature is map
+                && request.resource.data.ownerSignature.keys().hasOnly(['dataUrl', 'name', 'email', 'signedAt'])
+                && request.resource.data.ownerSignature.dataUrl is string
+                && request.resource.data.ownerSignature.dataUrl.size() <= 300000
+                && request.resource.data.ownerSignature.email == myEmail()));
+
+      // Whoever manages payments records a payment, but only on a signed invoice. Only the money moves.
       allow update: if signedIn()
         && !isDisabled()
         && resource.data.orgId == currentUser().orgId
         && sameOffice(resource.data.get('officeId', ''))
         && may('managePayments')
+        && resource.data.get('ownerSignature', null) != null
         && request.resource.data.number == resource.data.number
         && request.resource.data.lines == resource.data.lines
         && request.resource.data.get('officeId', '') == resource.data.get('officeId', '')
@@ -504,19 +522,21 @@ service cloud.firestore {
         && request.resource.data.get('clientId', '') == resource.data.get('clientId', '')
         && request.resource.data.get('clientName', '') == resource.data.get('clientName', '')
         && request.resource.data.totalKobo == resource.data.totalKobo
+        && request.resource.data.get('ownerSignature', null) == resource.data.get('ownerSignature', null)
         && request.resource.data.payments is list
         && request.resource.data.payments.size() >= resource.data.payments.size()
         && request.resource.data.status in ['unpaid', 'part-paid', 'paid']
         && request.resource.data.paidKobo is int
         && request.resource.data.balanceKobo is int;
 
-      // A paid invoice may be marked sent (and only a paid one).
+      // A paid and signed invoice may be marked sent (and only that kind).
       allow update: if signedIn()
         && !isDisabled()
         && resource.data.orgId == currentUser().orgId
         && sameOffice(resource.data.get('officeId', ''))
         && resource.data.get('sentAt', null) == null
         && resource.data.status == 'paid'
+        && resource.data.get('ownerSignature', null) != null
         && request.resource.data.sentAt is string
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['sentAt', 'updatedAt']);
 
@@ -526,7 +546,7 @@ service cloud.firestore {
         && resource.data.orgId == currentUser().orgId
         && sameOffice(resource.data.get('officeId', ''))
         && !request.resource.data.diff(resource.data).affectedKeys()
-             .hasAny(['snapshot', 'office', 'sentAt', 'createdAt'])
+             .hasAny(['snapshot', 'office', 'sentAt', 'createdAt', 'ownerSignature'])
         && request.resource.data.number == resource.data.number
         && request.resource.data.get('officeId', '') == resource.data.get('officeId', '')
         && request.resource.data.orgId == resource.data.orgId

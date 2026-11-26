@@ -48,6 +48,8 @@ import {
   type OfficeSectionKey,
 } from '../data/offices'
 import { listInvoices } from '../data/invoices'
+// PHASE 56 — an invoice code changed, so that sub account's own Drive folder is renamed by its id.
+import { renameOfficeFolder } from '../data/driveShared'
 import {
   inviteKey,
   inviteStaff,
@@ -390,6 +392,7 @@ export function OfficesPanel({ user, onBack }: OfficesPanelProps) {
         setInviteEmail('')
         setInviteNote('')
       } else if (editing) {
+        const before = findOffice(editing)
         const office = updateOffice(editing, form)
         writeAudit({
           action: 'office.updated',
@@ -399,6 +402,14 @@ export function OfficesPanel({ user, onBack }: OfficesPanelProps) {
           detail: `Edited the ${office.name} office. Invoices already raised keep the details they were sent with.`,
         })
         setMessage(`${office.name} saved. Old invoices keep the copy they were raised with.`)
+        // PHASE 56 — a changed invoice code, and only that, renames this office's own Drive folder.
+        // Renaming the office itself changes nothing in Drive. Owners and admins only; the Worker
+        // refuses anyone else, and a failure is ignored: the office keeps working either way.
+        const wasPrefix = (before?.prefix ?? '').trim().toUpperCase()
+        const nowPrefix = (office.prefix ?? '').trim().toUpperCase()
+        if (wasPrefix !== nowPrefix && nowPrefix) {
+          void renameOfficeFolder({ id: office.id, orgId: office.orgId, prefix: nowPrefix })
+        }
       }
       setEditing(null)
       setForm(EMPTY)
