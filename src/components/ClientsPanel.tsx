@@ -14,7 +14,7 @@ import {
   findClientByPhone,
   type Client,
 } from '../data/clients'
-import { listInvoices, useInvoicesVersion, type Invoice } from '../data/invoices'
+import { awaitsPaymentConfirmation, listInvoices, PENDING_LABEL, useInvoicesVersion, type Invoice } from '../data/invoices'
 import { can } from '../data/users'
 import { ALL_OFFICES, NO_SUB_ACCOUNT, officeOfRecord, selectedOffice } from '../data/offices'
 import type { SignedInUser } from '../data/auth'
@@ -433,7 +433,10 @@ export function ClientsPanel({ user, onOpenInvoice }: ClientsPanelProps) {
                                 <span>{formatNaira(one.totalKobo)}</span>
                                 <span>paid {formatNaira(one.paidKobo)}</span>
                                 <span>balance {formatNaira(one.balanceKobo)}</span>
-                                <span className="uppercase tracking-[0.08em] text-[10px] text-muted">{one.status}</span>
+                                <span className="uppercase tracking-[0.08em] text-[10px] text-muted">
+                                  {/* THIS TASK, ITEM 6: the same label as the All invoices list. */}
+                                  {awaitsPaymentConfirmation(one) ? PENDING_LABEL : one.status}
+                                </span>
                               </button>
                             </li>
                           ))}

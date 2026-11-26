@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Icon } from './Icon'
 import { InvoiceCard } from './InvoiceCard'
 import { Attachments, emptyMedia, type MediaState, type PickedMedia } from './Attachments'
@@ -32,6 +32,7 @@ import {
   expressDaysOf,
   expressKoboOf,
   findInvoice, lineAmount,
+  maySignForOwner,
   mayManagePayments,
   totalsFor,
   updateInvoice,
@@ -41,6 +42,7 @@ import {
   type InvoiceSpeed,
 } from '../data/invoices'
 import type { SignedInUser } from '../data/auth'
+import { OwnerSignatureCard, type OwnerSignatureHandle } from './OwnerSignatureCard'
 
 interface InvoiceCreateProps {
   user: SignedInUser
@@ -219,7 +221,14 @@ export function InvoiceCreate({ user, onSaved, onCancel, editing, onRestart, onS
    * moment later out of the draft itself, which is the copy of record.
    */
   const boot = useMemo(() => readDraftSync<InvoiceWork>(user.email, draftForm), [user.email, draftForm])
-  const linesLocked = Boolean(existing && (existing.paidKobo > 0 || existing.payments.length > 0))
+  /**
+   * THIS TASK, ITEM 1: the owner may open a paid or an already-sent invoice to sign it, and the lines
+   * and totals there stay read-only — only the Signature section works. Money recorded already fixed
+   * the lines; a sent invoice is fixed by the database's own rules, so the form says so instead of
+   * letting a change be typed and then refused.
+   */
+  const moneyOn = Boolean(existing && (existing.paidKobo > 0 || existing.payments.length > 0))
+  const linesLocked = Boolean(existing && (moneyOn || existing.sentAt))
   const services = useMemo(() => activeServices(user.orgId), [user.orgId])
   const categoryNames = useMemo(() => {
     const names = [...listCategories(user.orgId).map((item) => item.name), ...knownCategories(user.orgId)]
@@ -321,6 +330,11 @@ export function InvoiceCreate({ user, onSaved, onCancel, editing, onRestart, onS
   }))
   const [mismatch, setMismatch] = useState<string | null>(null)
   const mayPay = mayManagePayments(user)
+  /**
+   * THIS TASK, ITEM 2: the signature section of a saved invoice, so Save can ask it to save an
+   * unsaved drawing first. It is null on a new invoice, where there is no signature to keep.
+   */
+  const signatureRef = useRef<OwnerSignatureHandle | null>(null)
 
   /**
    * The office this invoice is raised at: the sub account in view, the raiser's own, or an admin's pick.
@@ -726,7 +740,16 @@ export function InvoiceCreate({ user, onSaved, onCancel, editing, onRestart, onS
     // asked about first (points 2 and 3).
     // PHASE 50, ITEM 4: how much of what was typed is over the balance (0 for an ordinary payment).
     const extraKobo = payment.paid ? extraKoboOf(payment, paymentFacts) : 0
-    if (payment.paid) {
+    /*
+     * THIS TASK, ITEM 2: ON EDIT INVOICE NOTHING ASKS OR REFUSES ABOUT A PAYMENT AMOUNT.
+     *
+     * Every question below belongs to Create Invoice, where the payment is being worked out for the
+     * first time. An admin who opens a saved invoice — to sign it, or just to correct a line — must
+     * never be stopped by "this amount leaves X owed, record it anyway?" or by any other remark about
+     * money: the Payment card there records what was actually paid, exactly as typed. So the whole
+     * block runs on a new invoice only. Nothing else about the save changes.
+     */
+    if (payment.paid && !editing) {
       const problem = paymentProblem(payment, paymentFacts)
       if (problem) {
         setError(problem)
@@ -763,6 +786,10 @@ export function InvoiceCreate({ user, onSaved, onCancel, editing, onRestart, onS
       extraKobo > 0 && payment.extraFor === EXTRA_FEE && speed === 'express' && expressFeeKobo === 0
     setBusy(true)
     try {
+      // THIS TASK, ITEM 2: a drawing still sitting on the signature pad is saved FIRST, in this same
+      // action, so nobody loses a signature by pressing Save. It is its own small write — the
+      // signature and updatedAt and nothing else — so it cannot touch a line, a total or a payment.
+      if (existing) await signatureRef.current?.flush()
       // THE CLIENT IS WRITTEN IN THIS SAME STEP, on a new invoice and on an edit alike, and
       // whether or not Google Drive is connected: matched by the cleaned number, so the same
       // person is never saved twice, and never kept out of the collection by the Drive.
@@ -1180,8 +1207,9 @@ export function InvoiceCreate({ user, onSaved, onCancel, editing, onRestart, onS
         </div>
         {linesLocked ? (
           <p className="mt-1 text-[12px] leading-5 text-muted">
-            A payment is confirmed on this invoice, so its lines are fixed. The client's details, the photos, the
-            videos and the links can still be changed.
+            {moneyOn
+              ? "A payment is confirmed on this invoice, so its lines are fixed. The client's details, the photos, the videos and the links can still be changed."
+              : 'This invoice has been sent, so its lines are fixed. You can still sign it below.'}
           </p>
         ) : null}
         {categoryNames.length === 0 || services.length === 0 ? (
@@ -1563,6 +1591,13 @@ export function InvoiceCreate({ user, onSaved, onCancel, editing, onRestart, onS
           onConfirmAnyway={() => save(true)}
           onGoBack={() => setMismatch(null)}
         />
+      ) : null}
+
+      {/* THE OWNER'S SIGNATURE (this task, item 1): on a saved invoice, for the owner or an admin
+          only — an office user never sees this section in any view. Signing writes the signature and
+          nothing else, so it works on an invoice that is already paid or already sent. */}
+      {existing && maySignForOwner(user) ? (
+        <OwnerSignatureCard ref={signatureRef} invoiceId={existing.id} user={user} />
       ) : null}
 
       {error ? (

@@ -105,6 +105,26 @@ export interface PickupSignature {
   feedback?: string
 }
 
+/**
+ * THE OWNER'S SIGNATURE ON ONE INVOICE (this task, item 1).
+ *
+ * Four fields and nothing else, because the database rules allow exactly these four keys and
+ * refuse anything else: the drawing itself as a `data:image/png` URL with a transparent
+ * background, who signed, the address the database insists is the signed-in person's, and when.
+ * It lives on `invoices/{id}.ownerSignature` and is written on its own, in one small update,
+ * so nothing about saving the invoice can reach it and nothing about signing can reach the
+ * invoice's lines, totals or payments.
+ */
+export interface OwnerSignature {
+  /** A `data:image/png` URL, transparent behind the strokes, under 250 kB. */
+  dataUrl: string
+  name: string
+  /** The signed-in person's address: the rules check it is theirs. */
+  email: string
+  /** ISO date and time. */
+  signedAt: string
+}
+
 /** One line of an invoice. The item is typed here; it is never a separate list. */
 export interface InvoiceLine {
   id: string
@@ -266,6 +286,13 @@ export interface Invoice {
    * Drive queue, so it can never reach the Incoming Invoices or Clients folders.
    */
   pickupSignature?: PickupSignature | null
+  /**
+   * THE OWNER'S SIGNATURE (this task). Absent until an owner or an admin signs the invoice on
+   * Edit invoice. The invoice sheet, the PDF and the client copy show it on the straight line
+   * above "Authorized Signatory" the moment it exists; with none they show exactly what they
+   * always did. Nothing except the signature section of Edit invoice writes it.
+   */
+  ownerSignature?: OwnerSignature | null
   /**
    * PHASE 11, item 6: the last delivery note sent to the Drive for this invoice — its file name,
    * when it went, and every invoice the same note covered. Absent until the person presses Send.
@@ -811,11 +838,23 @@ async function writeStore(invoices: Invoice[]): Promise<void> {
   const db = await requireDb()
   const before = new Map(memory.map((invoice) => [invoice.id, JSON.stringify(invoice)]))
   const changed = invoices.filter((invoice) => before.get(invoice.id) !== JSON.stringify(invoice))
+  /*
+   * THIS TASK, ITEM 4: NOTHING HERE EVER WRITES A SIGNATURE.
+   *
+   * An ordinary invoice write — a corrected line, a recorded payment, the stamp, a new office —
+   * carries the invoice's own fields and leaves `ownerSignature` out of the request altogether. Two
+   * things follow, and both are needed: an edit physically cannot overwrite a signature someone
+   * saved a moment earlier, and the database's rule for an edit (which allows only certain keys to be
+   * touched) never sees the signature in the request at all. A signature is written by one place
+   * only: writeOwnerSignature(), with its own two-key update.
+   */
   if (changed.length > 0) {
     try {
       const { doc, setDoc } = await import('firebase/firestore')
       for (const invoice of changed) {
-        await setDoc(doc(db, INVOICES_COLLECTION, invoice.id), toDoc(invoice), { merge: true })
+        const payload = toDoc(invoice)
+        delete payload.ownerSignature
+        await setDoc(doc(db, INVOICES_COLLECTION, invoice.id), payload, { merge: true })
         if (invoice.number) serverNumbers.add(invoice.number)
       }
     } catch (error) {
@@ -1013,14 +1052,18 @@ export function findInvoice(id: string): Invoice | null {
   return readStore().find((invoice) => invoice.id === id) ?? null
 }
 
-export type InvoiceFilter = 'all' | InvoiceStatus | 'unsent'
+export type InvoiceFilter = 'all' | InvoiceStatus | 'unsent' | 'pending-confirmation'
 
 /** The search box and the filter row above the invoice list. */
 export function searchInvoices(query: string, filter: InvoiceFilter, orgId = 'local'): Invoice[] {
   const needle = query.trim().toLowerCase()
   return listInvoices(orgId).filter((invoice) => {
     if (filter === 'unsent' && invoice.sentAt) return false
-    if (filter !== 'all' && filter !== 'unsent' && invoice.status !== filter) return false
+    // THIS TASK, ITEM 6: the All invoices filter — signed, and nothing paid against it yet.
+    if (filter === 'pending-confirmation' && !awaitsPaymentConfirmation(invoice)) return false
+    if (filter !== 'all' && filter !== 'unsent' && filter !== 'pending-confirmation' && invoice.status !== filter) {
+      return false
+    }
     if (!needle) return true
     if (invoice.number.toLowerCase().includes(needle)) return true
     if (invoice.clientName.toLowerCase().includes(needle)) return true
@@ -1291,6 +1334,10 @@ export async function updateInvoice(
     pleaseNote: draft.pleaseNote === undefined ? existing.pleaseNote : cleanText(draft.pleaseNote, 400),
     updatedAt: nowIso(),
   }
+  // THIS TASK, ITEM 4: saving the form never writes the owner's signature. The field is left out
+  // of the write altogether, so a signature saved on another device a moment ago survives, and
+  // the database rules that forbid an edit from changing it are met. The signature section saves
+  // on its own terms, and an unsaved drawing is saved by its own small write first.
   await writeStore(current.map((invoice) => (invoice.id === id ? saved : invoice)))
   return saved
 }
@@ -1758,6 +1805,130 @@ export async function setPickupSignature(
   return saved
 }
 
+/* ------------------------------------------- this task: the owner's signature */
+
+/**
+ * THE LINE EVERY SCREEN SAYS WHILE AN INVOICE HAS NO SIGNATURE (item 5). It is one string, used by
+ * Record payment and by Send invoice alike, so the two can never drift apart.
+ */
+export const SIGNED_ONLY_MESSAGE = "Waiting for the owner's signature"
+
+/** What Delete signature says instead of deleting on an invoice that has been paid (item 1). */
+export const SIGNATURE_LOCKED_MESSAGE = 'A payment is recorded, so sign again instead.'
+
+/**
+ * THE LABEL OF A SIGNED INVOICE WITH NOTHING PAID YET (item 6): on the invoice itself and in every
+ * list of invoices, until the office records the payment, when it leaves by itself.
+ */
+export const PENDING_LABEL = 'Pending payment confirmation'
+
+/**
+ * The longest drawing that may be saved: 250 kB of characters. The database's own rules allow
+ * 300000, so this leaves room and the refusal comes from here, in plain words, before a round trip.
+ */
+export const OWNER_SIGNATURE_MAX_CHARS = 250 * 1024
+
+/** Has the owner's signature been drawn and saved on this invoice? */
+export function isOwnerSigned(invoice: Invoice): boolean {
+  const dataUrl = invoice.ownerSignature?.dataUrl
+  return typeof dataUrl === 'string' && dataUrl.startsWith('data:image/')
+}
+
+/** Is at least one payment recorded on this invoice? */
+export function hasRecordedPayment(invoice: Invoice): boolean {
+  return Array.isArray(invoice.payments) && invoice.payments.length > 0
+}
+
+/**
+ * Signed, and nothing paid yet: the state item 6 calls "Pending payment confirmation". The office
+ * records the payment exactly as it does today, and the label leaves with it.
+ */
+export function awaitsPaymentConfirmation(invoice: Invoice): boolean {
+  return isOwnerSigned(invoice) && !hasRecordedPayment(invoice)
+}
+
+/** Only the owner and admins sign: the database refuses anybody else, so the screen does too. */
+export function maySignForOwner(user: { role: 'admin' | 'staff' } | null): boolean {
+  return user?.role === 'admin'
+}
+
+/**
+ * THE ONE WRITE THAT TOUCHES A SIGNATURE.
+ *
+ * Two fields go up and not one thing more — `ownerSignature` and `updatedAt` — because the
+ * database's rule for signing allows exactly those two keys to change and nothing else. That is
+ * also why signing works on an invoice that is already paid or sent, whose ordinary Save the rules
+ * refuse: this small write never goes near the invoice's own fields.
+ */
+async function writeOwnerSignature(id: string, ownerSignature: OwnerSignature | null): Promise<Invoice> {
+  const current = readStore()
+  const existing = current.find((invoice) => invoice.id === id)
+  if (!existing) throw new Error('That invoice is no longer saved.')
+  const db = await requireDb()
+  const at = nowIso()
+  try {
+    const { doc, setDoc, deleteField } = await import('firebase/firestore')
+    await setDoc(
+      doc(db, INVOICES_COLLECTION, id),
+      { ownerSignature: ownerSignature ?? deleteField(), updatedAt: at },
+      { merge: true },
+    )
+  } catch (error) {
+    throw new Error(`Not saved: ${reasonOf(error)}`)
+  }
+  const saved: Invoice = { ...existing, ownerSignature, updatedAt: at }
+  publish(current.map((invoice) => (invoice.id === id ? saved : invoice)))
+  return saved
+}
+
+/**
+ * SIGN IT, OR SIGN IT AGAIN (item 1).
+ *
+ * The drawing is saved exactly as the pad gave it: nothing is resized, cropped or re-encoded, so
+ * the line on the invoice is the owner's own hand. The address written beside it is the
+ * signed-in person's, because the database checks that it is theirs.
+ */
+export async function saveOwnerSignature(
+  id: string,
+  input: { dataUrl: string },
+  actor: { email: string; name?: string; role: 'admin' | 'staff' },
+): Promise<Invoice> {
+  if (!maySignForOwner(actor)) throw new Error('Only the owner or an admin can sign an invoice.')
+  const dataUrl = typeof input.dataUrl === 'string' ? input.dataUrl.trim() : ''
+  if (!dataUrl.startsWith('data:image/')) throw new Error('Draw the signature on the pad first, then save it.')
+  if (dataUrl.length > OWNER_SIGNATURE_MAX_CHARS) {
+    throw new Error('That drawing is over 250 kB, so it cannot be saved. Clear the pad and sign again.')
+  }
+  const at = nowIso()
+  return writeOwnerSignature(
+    id,
+    {
+      dataUrl,
+      name: cleanText(actor.name ?? '', 120) || cleanText(actor.email.split('@')[0] ?? '', 120),
+      email: cleanText(actor.email, 254).toLowerCase(),
+      signedAt: at,
+    },
+  )
+}
+
+/**
+ * DELETE THE SIGNATURE (item 1) — and nothing else.
+ *
+ * Refused while a payment is recorded, with the exact sentence the owner asked for, because money
+ * has been taken against this signature: signing again replaces it instead.
+ */
+export async function deleteOwnerSignature(
+  id: string,
+  actor: { email: string; role: 'admin' | 'staff' },
+): Promise<Invoice> {
+  if (!maySignForOwner(actor)) throw new Error('Only the owner or an admin can delete a signature.')
+  const current = readStore()
+  const existing = current.find((invoice) => invoice.id === id)
+  if (!existing) throw new Error('That invoice is no longer saved.')
+  if (hasRecordedPayment(existing)) throw new Error(SIGNATURE_LOCKED_MESSAGE)
+  return writeOwnerSignature(id, null)
+}
+
 /* ------------------------------------------------- phase 11: many people, one signature */
 
 /**
@@ -2050,6 +2221,11 @@ export async function markSent(id: string): Promise<Invoice> {
   if (!existing) throw new Error('That invoice is no longer saved.')
   if (!existing.paidStampAt || existing.status !== 'paid') {
     throw new Error('Confirm the payment first: an invoice is sent only once it is paid in full.')
+  }
+  // THIS TASK, ITEM 5: an unsigned invoice is never sent. The screen says the plain sentence
+  // while it refuses, so nobody has to guess what is missing.
+  if (!isOwnerSigned(existing)) {
+    throw new Error(`${SIGNED_ONLY_MESSAGE}. Sign it on Edit invoice first.`)
   }
   // round 34: the first send is the one that counts. This used to stamp nowIso() again, which only
   // looked harmless because a second send in the same test run usually lands in the same millisecond;

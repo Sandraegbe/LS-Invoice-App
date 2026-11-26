@@ -11,14 +11,19 @@ import { writeAudit } from '../data/audit'
 import { recordPaymentOnInvoice } from '../data/handoff'
 import { subscribeSync } from '../data/sync'
 import {
+  awaitsPaymentConfirmation,
   changePickupDate,
   EXTRA_EXPRESS,
   findInvoice,
+  isOwnerSigned,
   listInvoices,
   markSent,
   mayCreateInvoices,
   mayEdit,
   mayManagePayments,
+  maySignForOwner,
+  PENDING_LABEL,
+  SIGNED_ONLY_MESSAGE,
   deleteInvoice,
   setExpressFee,
   setPaidStamp,
@@ -483,7 +488,17 @@ export function InvoiceView({ id, user, onBack, onDeleted, onEdit }: InvoiceView
    */
   const letterhead = readSettings()
   const signatoryName = letterhead.signatoryName.trim()
-  const paidSignature = invoice.status === 'paid' ? letterhead.signatureDataUrl : ''
+  /**
+   * THIS TASK, ITEM 3: the owner's own signature, once one is saved on the invoice, is the picture
+   * that sits on the straight line above "Authorized Signatory" — on screen, in print, in the PDF
+   * and in the client copy. It shows whatever the invoice's state, because the owner may sign a paid
+   * invoice. With no ownerSignature saved, this is exactly what it always was: the letterhead's
+   * picture on a paid invoice, and nothing at all otherwise.
+   */
+  const ownerSignature: string = invoice.ownerSignature?.dataUrl ?? ''
+  const signatureImage = ownerSignature || (invoice.status === 'paid' ? letterhead.signatureDataUrl : '')
+  /** Has the owner signed this invoice? Record payment and Send invoice wait for this (item 5). */
+  const signedByOwner = isOwnerSigned(invoice)
 
   return (
     <div className="flex flex-col gap-3">
@@ -805,6 +820,14 @@ export function InvoiceView({ id, user, onBack, onDeleted, onEdit }: InvoiceView
           </ul>
         )}
 
+        {/* THIS TASK, ITEM 6: signed and nothing paid yet — the label it carries until the office
+            records the payment, on the invoice and in every list of invoices. */}
+        {awaitsPaymentConfirmation(invoice) ? (
+          <p className="mt-2 inline-flex items-center rounded-full border border-gold-deep bg-gold-wash px-2 py-[1px] text-[11.5px] font-semibold text-gold-deep">
+            {PENDING_LABEL}
+          </p>
+        ) : null}
+
         {invoice.status === 'paid' ? (
           <p className="mt-2 text-[13px] font-semibold text-gold-deep">
             Paid in full on {formatDateDDMMYYYY(invoice.paidStampAt ?? invoice.updatedAt)}.
@@ -853,44 +876,64 @@ export function InvoiceView({ id, user, onBack, onDeleted, onEdit }: InvoiceView
       ) : null}
 
       {mayStamp && invoice.balanceKobo > 0 ? (
-        <PaymentCard
-          facts={{
-            invoiceId: invoice.id,
-            clientId: invoice.clientId,
-            orgId: invoice.orgId,
-            totalKobo: invoice.totalKobo,
-            paidKobo: invoice.paidKobo,
-            balanceKobo: invoice.balanceKobo,
-            lines: invoice.lines,
-            creating: false,
-          }}
-          entry={entry}
-          onChange={changeEntry}
-          toggleLabel={invoice.paidKobo > 0 ? 'Add payment' : 'Paid'}
-          note={
-            invoice.paidKobo > 0
-              ? `${formatNaira(invoice.balanceKobo)} still owed. Add what the client has just paid.`
-              : 'Nothing is paid yet. Turn this on when the client pays.'
-          }
-          actionLabel="Save payment"
-          onAction={savePayment}
-          invoiceNumber={invoice.number}
-          busy={busy}
-          mismatch={mismatch}
-          onConfirmAnyway={savePayment}
-          onGoBack={() => setMismatch(null)}
-          error={error}
-        />
+        signedByOwner ? (
+          <PaymentCard
+            facts={{
+              invoiceId: invoice.id,
+              clientId: invoice.clientId,
+              orgId: invoice.orgId,
+              totalKobo: invoice.totalKobo,
+              paidKobo: invoice.paidKobo,
+              balanceKobo: invoice.balanceKobo,
+              lines: invoice.lines,
+              creating: false,
+            }}
+            entry={entry}
+            onChange={changeEntry}
+            toggleLabel={invoice.paidKobo > 0 ? 'Add payment' : 'Paid'}
+            note={
+              invoice.paidKobo > 0
+                ? `${formatNaira(invoice.balanceKobo)} still owed. Add what the client has just paid.`
+                : 'Nothing is paid yet. Turn this on when the client pays.'
+            }
+            actionLabel="Save payment"
+            onAction={savePayment}
+            invoiceNumber={invoice.number}
+            busy={busy}
+            mismatch={mismatch}
+            onConfirmAnyway={savePayment}
+            onGoBack={() => setMismatch(null)}
+            error={error}
+          />
+        ) : (
+          /* THIS TASK, ITEM 5: no money goes on an invoice the owner has not signed. The office sees
+             the same sentence as the owner does; the owner is told where to sign it. */
+          <section className="app-card">
+            <h3 className="text-[15px] font-semibold text-ink">Payment</h3>
+            <p className="mt-1 text-[12px] leading-5 text-muted">
+              {maySignForOwner(user)
+                ? `${SIGNED_ONLY_MESSAGE}. Sign it on Edit invoice first.`
+                : `${SIGNED_ONLY_MESSAGE}. The owner signs it on Edit invoice.`}
+            </p>
+            <button type="button" className="btn-dark mt-2 justify-center" disabled>
+              Record payment
+            </button>
+          </section>
+        )
       ) : null}
 
       <section className="app-card">
         <h3 className="text-[15px] font-semibold text-ink">Send</h3>
         <p className="mt-1 text-[12px] leading-5 text-muted">
-          {invoice.sentAt
-            ? `Sent on ${formatDateDDMMYYYY(invoice.sentAt)}. The client copy is the sheet above.`
-            : invoice.status === 'paid'
-              ? 'Paid in full, so the client copy can go out.'
-              : 'An invoice is sent only once it is paid in full: confirm the payment first.'}
+          {!signedByOwner
+            ? maySignForOwner(user)
+              ? `${SIGNED_ONLY_MESSAGE}. Sign it on Edit invoice first.`
+              : `${SIGNED_ONLY_MESSAGE}. The owner signs it on Edit invoice.`
+            : invoice.sentAt
+              ? `Sent on ${formatDateDDMMYYYY(invoice.sentAt)}. The client copy is the sheet above.`
+              : invoice.status === 'paid'
+                ? 'Paid in full, so the client copy can go out.'
+                : 'An invoice is sent only once it is paid in full: confirm the payment first.'}
         </p>
         {invoice.status === 'paid' && sendOpen ? (
           <div className="mt-2 grid gap-2">
@@ -920,7 +963,7 @@ export function InvoiceView({ id, user, onBack, onDeleted, onEdit }: InvoiceView
               setError(null)
               setSendOpen(true)
             }}
-            disabled={invoice.status !== 'paid'}
+            disabled={invoice.status !== 'paid' || !signedByOwner}
           >
             <Icon name="mail" size={16} />
             Send invoice
@@ -950,10 +993,10 @@ export function InvoiceView({ id, user, onBack, onDeleted, onEdit }: InvoiceView
           before it is drawn. Item 3 of phase 49: the picture is on a paid invoice only. */}
       <div className="inv-sign-block">
         <div className="inv-sign-line">
-          {paidSignature ? (
+          {signatureImage ? (
             <img
               className="inv-sign-image"
-              src={paidSignature}
+              src={signatureImage}
               alt={signatoryName ? `Signature of ${signatoryName}` : 'Authorized signature'}
             />
           ) : null}

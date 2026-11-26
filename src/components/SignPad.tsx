@@ -1,9 +1,11 @@
 /**
- * THE SIGNATURE PAD OF THE PICKUP SECTION'S NEW COLLECTION SCREEN — the only screen that has one.
+ * THE SIGNATURE PAD OF THE PICKUP SECTION'S NEW COLLECTION SCREEN.
  *
- * An invoice never shows or carries a signature, so nothing else draws this pad. A screen that
- * wants Clear and Undo last stroke in its own row below the pad turns them off here and draws them
- * itself, using the two actions this hands back.
+ * This pad belongs to a collection: its picture is a client's mark when items were handed over, and
+ * it is stored on the collection, in the pickupSignature of the invoice. It is not the pad the owner
+ * signs an invoice with — that one is in OwnerSignatureCard, which keeps its drawing in memory and
+ * saves a PNG with nothing behind it. A screen that wants Clear and Undo last stroke in its own row
+ * below the pad turns them off here and draws them itself, using the two actions this hands back.
  *
  * A white panel with a thin border, the full width of the screen up to 560 px, 180 px tall on a
  * phone and 220 px tall from 768 px up. Grey words "Sign here" sit in the middle until the first

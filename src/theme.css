@@ -2002,6 +2002,26 @@
     margin-block-end: 4px;
   }
 
+  /* THIS TASK: the signature as Edit invoice shows it once it is saved — the drawing on its own
+     straight line, left-aligned under the pad, so it looks like the line it will print on. The
+     picture keeps its own proportions and its transparent background, so nothing sits behind it. */
+  .owner-sign {
+    display: block;
+    width: 100%;
+    max-width: 300px;
+    padding-block: 4px 3px;
+    border-bottom: 1px solid var(--color-line);
+  }
+
+  .owner-sign__image {
+    display: block;
+    width: 100%;
+    height: auto;
+    max-height: 62px;
+    object-fit: contain;
+    object-position: left bottom;
+  }
+
   .inv-sign-name {
     font-size: 12px;
     font-weight: 600;

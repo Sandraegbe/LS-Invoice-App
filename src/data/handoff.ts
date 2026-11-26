@@ -9,6 +9,9 @@
  *
  * Every later payment queues a new "Payment" record with the same invoice number and its own
  * date. Nothing already in the Drive is ever edited or replaced.
+ *
+ * THIS TASK, ITEM 7: the PDF is queued for Incoming Invoices only when the invoice is signed as
+ * well as paid. An unsigned invoice writes no PDF, however much has been paid against it.
  */
 
 import { buildInvoicePdf, type PdfLine, type PdfPhoto } from '../lib/pdf'
@@ -23,6 +26,7 @@ import {
   changePickupDate,
   confirmPayment,
   findInvoice,
+  isOwnerSigned,
   setDriveError,
   setDriveSyncStatus,
   type Invoice,
@@ -93,8 +97,12 @@ export async function afterPayment(
 
   // The PDF goes to Incoming Invoices ONCE, with the first payment on the invoice — a part
   // payment writes it too, because the client has then paid something (this task, point 9).
+  //
+  // THIS TASK, ITEM 7: and only once the owner has signed it. Both halves are needed now —
+  // a signature alone sends nothing, and money alone sends nothing — so a client's invoice
+  // reaches the office's Incoming Invoices folder exactly when it is signed and paid.
   const firstPayment = before.payments.length === 0 && after.payments.length > 0
-  if (!firstPayment) return { notes, pdfQueued }
+  if (!firstPayment || !isOwnerSigned(after)) return { notes, pdfQueued }
 
   try {
     const paidLines: PdfLine[] = after.lines
@@ -158,7 +166,13 @@ export async function afterPayment(
       signatureName: (after.pickupSignature?.name ?? '').replace(/\s+/g, ' ').trim().slice(0, 60),
       // PHASE 49, ITEM 3: the letterhead's own authorized signature, read here as the file is made,
       // and only while the invoice is paid — an unpaid or part-paid one prints the name alone.
-      signatureImage: after.status === 'paid' ? letterheadNow.signatureDataUrl : '',
+      // THIS TASK, ITEM 3: the owner's own signature, when one is saved on the invoice, is the
+      // signature the client gets — on screen, in print and in this PDF alike.
+      signatureImage: isOwnerSigned(after)
+        ? (after.ownerSignature?.dataUrl ?? '')
+        : after.status === 'paid'
+          ? letterheadNow.signatureDataUrl
+          : '',
       signatoryName: letterheadNow.signatoryName,
       // PHASE 33, ITEM 3: the copy kept for Incoming Invoices carries the stamp exactly when the
       // invoice's Paid switch is on.

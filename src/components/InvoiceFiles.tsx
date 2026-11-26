@@ -9,7 +9,8 @@
  *
  *   "Download invoice PDF" calls the builder the app already uses — the INVOICE LOOK layout in
  *   lib/pdf.ts — with a title of INVOICE. The layout is not drawn a second time here, and the only
- *   picture handed to it is the letterhead's signature, and only while the invoice is paid.
+ *   picture handed to it is a signature: the owner's own when the invoice carries one, and otherwise
+ *   the letterhead's, and only while the invoice is paid.
  *
  *   The receipt is offered only once the Paid stamp is on. It is the same layout with a title of
  *   RECEIPT, and it prints the picture of every item attached when the invoice was made.
@@ -24,7 +25,7 @@ import { readPending } from '../lib/blobstore'
 import { listJobs } from '../data/sync'
 import { dayOf, lineForPhoto } from '../data/records'
 import { readSettings } from '../data/settings'
-import type { Invoice } from '../data/invoices'
+import { isOwnerSigned, type Invoice } from '../data/invoices'
 
 interface Props {
   invoice: Invoice
@@ -313,7 +314,13 @@ export async function invoicePdfBlob(invoice: Invoice, title: 'INVOICE' | 'RECEI
     signatureName: signedByOf(invoice),
     // PHASE 49, ITEM 3: the letterhead's own authorized signature, read above as the file is made,
     // and handed over only while the invoice is paid. An unpaid invoice prints the name alone.
-    signatureImage: invoice.status === 'paid' ? letterheadNow.signatureDataUrl : '',
+    // THIS TASK, ITEM 3: once the owner has signed the invoice, the owner's own signature is the one
+    // the client gets — on screen, in print, in this PDF and in the client copy alike.
+    signatureImage: isOwnerSigned(invoice)
+      ? (invoice.ownerSignature?.dataUrl ?? '')
+      : invoice.status === 'paid'
+        ? letterheadNow.signatureDataUrl
+        : '',
     signatoryName: letterheadNow.signatoryName,
     // The stamp on the paper follows the Paid switch on the screen.
     stampOn: invoice.stampOn === true,
