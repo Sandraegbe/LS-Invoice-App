@@ -8,7 +8,7 @@ import { InvoiceFiles, invoicePdfBlob } from './InvoiceFiles'
 import { formatDateDDMMYYYY, formatNaira } from '../lib/format'
 import { PAYMENT_STATUSES, queuePickupDateChanged } from '../data/records'
 import { writeAudit } from '../data/audit'
-import { recordPaymentOnInvoice } from '../data/handoff'
+import { recordPaymentOnInvoice, afterSignatureChange } from '../data/handoff'
 import { subscribeSync } from '../data/sync'
 import {
   awaitsPaymentConfirmation,
@@ -21,9 +21,8 @@ import {
   mayCreateInvoices,
   mayEdit,
   mayManagePayments,
-  maySignForOwner,
   PENDING_LABEL,
-  SIGNED_ONLY_MESSAGE,
+  sendBlockers,
   deleteInvoice,
   setExpressFee,
   setPaidStamp,
@@ -84,9 +83,6 @@ export function InvoiceView({ id, user, onBack, onDeleted, onEdit }: InvoiceView
   /** The question asked before a status that disagrees with the amount is saved. */
   const [mismatch, setMismatch] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
-  /** The toggle was turned off, so a reason is being asked for before the stamp comes off. */
-  const [unstamping, setUnstamping] = useState(false)
-  const [reason, setReason] = useState('')
   /** The reason typed for a new pick-up date: required once a date is already on the invoice. */
   const [pickupReason, setPickupReason] = useState('')
   /** Bumped whenever a Drive job changes, so this invoice's own status stays current. */
@@ -161,11 +157,15 @@ export function InvoiceView({ id, user, onBack, onDeleted, onEdit }: InvoiceView
     setTick((value) => value + 1)
   }
 
-  async function onWithdraw() {
+  /**
+   * THIS TASK, ITEM 5: the stamp comes off when the toggle is turned off, with nothing asked first.
+   * Every payment stays on the invoice; the audit log records that it was switched off by hand.
+   */
+  async function stampOffNow() {
     setError(null)
     const before = invoice!
     try {
-      const result = await setPaidStamp(before.id, false, reason, {
+      const result = await setPaidStamp(before.id, false, '', {
         email: user.email,
         role: user.role,
         permissions: user.permissions as unknown as Record<string, boolean>,
@@ -177,21 +177,19 @@ export function InvoiceView({ id, user, onBack, onDeleted, onEdit }: InvoiceView
         target: before.number,
         detail: result.reason,
       })
-      setReason('')
-      setUnstamping(false)
-      setNotice('The stamp is off. Every payment stays on the invoice; the reason is kept in the audit log.')
+      setNotice('The stamp is off. Every payment stays on the invoice.')
       refresh()
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'The stamp could not be taken off.')
     }
   }
 
-  /** The toggle turned on: the stamp goes on, and the money that pays for it is already there. */
+  /** The toggle turned on: the stamp goes on, at any time and with nothing asked (item 5). */
   async function turnStampOn() {
     setError(null)
     const before = invoice!
     try {
-      await setPaidStamp(before.id, true, '', {
+      const result = await setPaidStamp(before.id, true, '', {
         email: user.email,
         role: user.role,
         permissions: user.permissions as unknown as Record<string, boolean>,
@@ -205,21 +203,17 @@ export function InvoiceView({ id, user, onBack, onDeleted, onEdit }: InvoiceView
       })
       setNotice('The stamp is on.')
       refresh()
+      // THIS TASK, ITEM 2: the stamp can be the last of the three things a client's copy needs, so
+      // the same trigger runs here as runs after a payment.
+      await afterSignatureChange(before, result.invoice, { email: user.email, name: user.name })
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'The stamp could not be turned on.')
     }
   }
 
-  /**
-   * A change in the Payment card. Turning the Paid toggle off on an invoice that already has
-   * money on it asks why first, and that answer goes in the audit log.
-   */
+  /** A change in the Payment card. Nothing is held back for a signature or a stamp (item 2). */
   function changeEntry(patch: Partial<PaymentEntry>) {
     setError(null)
-    if (patch.paid === false && invoice!.paidKobo > 0) {
-      setUnstamping(true)
-      return
-    }
     setEntry((current) => ({ ...current, ...patch }))
   }
 
@@ -388,10 +382,17 @@ export function InvoiceView({ id, user, onBack, onDeleted, onEdit }: InvoiceView
     refresh()
   }
 
-  /** The words every choice carries: the number and what has been paid. */
+  /**
+   * The words every choice carries (this task, item 2): the number, what has been paid and what is
+   * still owed, worked out from the invoice at the moment of sending — so a copy sent after a later
+   * payment carries the newer figures.
+   */
   function sendWords(): string {
     const label = invoice!.number || invoice!.id
-    return `Invoice ${label} · ${formatNaira(invoice!.paidKobo)} paid. Thank you.`
+    const paid = formatNaira(invoice!.paidKobo)
+    return invoice!.balanceKobo > 0
+      ? `Invoice ${label} · ${paid} paid, ${formatNaira(invoice!.balanceKobo)} still owed. Thank you.`
+      : `Invoice ${label} · ${paid} paid, nothing outstanding. Thank you.`
   }
 
   async function sendByShare() {
@@ -497,8 +498,15 @@ export function InvoiceView({ id, user, onBack, onDeleted, onEdit }: InvoiceView
    */
   const ownerSignature: string = invoice.ownerSignature?.dataUrl ?? ''
   const signatureImage = ownerSignature || (invoice.status === 'paid' ? letterhead.signatureDataUrl : '')
-  /** Has the owner signed this invoice? Record payment and Send invoice wait for this (item 5). */
+  /** Has the owner signed this invoice? Send invoice waits for this, with the stamp and money. */
   const signedByOwner = isOwnerSigned(invoice)
+  /**
+   * THIS TASK, ITEM 2: a client's copy needs three things — the owner's signature, the PAID stamp
+   * on, and at least one payment recorded. `sendMissing` names the ones still missing and the Send
+   * button is offered only when there are none; `signedByOwner` is kept for the older checks above.
+   */
+  const sendMissing = sendBlockers(invoice)
+  const sendReady = sendMissing.length === 0 && signedByOwner
 
   return (
     <div className="flex flex-col gap-3">
@@ -772,9 +780,10 @@ export function InvoiceView({ id, user, onBack, onDeleted, onEdit }: InvoiceView
       <section className="app-card">
         <div className="flex items-center justify-between gap-2">
           <h3 className="text-[15px] font-semibold text-ink">Payments</h3>
-          {/* The Paid toggle: on puts the stamp on (needs a confirmed payment), off asks why
-              first and takes only the stamp off — every payment stays. No Unpaid button. */}
-          {mayStamp && (invoice.paidKobo > 0 || invoice.stampOn) ? (
+          {/* THIS TASK, ITEM 5: the Paid stamp goes on or off at any time — before a signature,
+              after one, with money recorded or with none — and nothing is asked for when it does.
+              Turning it off takes the stamp off and leaves every payment where it is. */}
+          {mayStamp ? (
             <button
               type="button"
               className={invoice.stampOn ? 'btn-dark' : 'btn-line'}
@@ -783,7 +792,7 @@ export function InvoiceView({ id, user, onBack, onDeleted, onEdit }: InvoiceView
               onClick={() => {
                 setError(null)
                 if (invoice.stampOn) {
-                  setUnstamping(true)
+                  void stampOffNow()
                   return
                 }
                 void turnStampOn()
@@ -839,34 +848,6 @@ export function InvoiceView({ id, user, onBack, onDeleted, onEdit }: InvoiceView
           </p>
         )}
 
-        {unstamping ? (
-          <div className="mt-3 flex flex-col gap-2">
-            <label className="block">
-              <span className="admin-label">Why is the stamp coming off?</span>
-              <input
-                className="admin-input"
-                value={reason}
-                onChange={(event) => setReason(event.target.value)}
-                placeholder="For example: the transfer was reversed"
-              />
-            </label>
-            <div className="flex flex-wrap gap-2">
-              <button type="button" className="btn-dark" onClick={onWithdraw} disabled={!reason.trim()}>
-                Take the stamp off
-              </button>
-              <button
-                type="button"
-                className="btn-line"
-                onClick={() => {
-                  setUnstamping(false)
-                  setReason('')
-                }}
-              >
-                Keep it paid
-              </button>
-            </div>
-          </div>
-        ) : null}
       </section>
 
       {/* THE PAYMENT CARD, the same one Create Invoice shows, inline at the bottom of the saved
@@ -875,9 +856,11 @@ export function InvoiceView({ id, user, onBack, onDeleted, onEdit }: InvoiceView
         <p className="text-[11px] text-muted">The payment being typed here is kept on this device until it is saved.</p>
       ) : null}
 
+      {/* THIS TASK, ITEMS 1 AND 2: the office records the money at any time — on an invoice the
+          owner has not signed, on one with no stamp, on any of them. The card is the same one
+          Create Invoice shows. */}
       {mayStamp && invoice.balanceKobo > 0 ? (
-        signedByOwner ? (
-          <PaymentCard
+        <PaymentCard
             facts={{
               invoiceId: invoice.id,
               clientId: invoice.clientId,
@@ -905,37 +888,20 @@ export function InvoiceView({ id, user, onBack, onDeleted, onEdit }: InvoiceView
             onGoBack={() => setMismatch(null)}
             error={error}
           />
-        ) : (
-          /* THIS TASK, ITEM 5: no money goes on an invoice the owner has not signed. The office sees
-             the same sentence as the owner does; the owner is told where to sign it. */
-          <section className="app-card">
-            <h3 className="text-[15px] font-semibold text-ink">Payment</h3>
-            <p className="mt-1 text-[12px] leading-5 text-muted">
-              {maySignForOwner(user)
-                ? `${SIGNED_ONLY_MESSAGE}. Sign it on Edit invoice first.`
-                : `${SIGNED_ONLY_MESSAGE}. The owner signs it on Edit invoice.`}
-            </p>
-            <button type="button" className="btn-dark mt-2 justify-center" disabled>
-              Record payment
-            </button>
-          </section>
-        )
       ) : null}
 
       <section className="app-card">
         <h3 className="text-[15px] font-semibold text-ink">Send</h3>
+        {/* THIS TASK, ITEM 2: one line, and it names whichever of the three things is still
+            missing — the owner's signature, the PAID stamp, a recorded payment. */}
         <p className="mt-1 text-[12px] leading-5 text-muted">
-          {!signedByOwner
-            ? maySignForOwner(user)
-              ? `${SIGNED_ONLY_MESSAGE}. Sign it on Edit invoice first.`
-              : `${SIGNED_ONLY_MESSAGE}. The owner signs it on Edit invoice.`
+          {sendMissing.length > 0
+            ? `Not ready to send yet: ${sendMissing.join(', ')} ${sendMissing.length === 1 ? 'is' : 'are'} still missing.`
             : invoice.sentAt
-              ? `Sent on ${formatDateDDMMYYYY(invoice.sentAt)}. The client copy is the sheet above.`
-              : invoice.status === 'paid'
-                ? 'Paid in full, so the client copy can go out.'
-                : 'An invoice is sent only once it is paid in full: confirm the payment first.'}
+              ? `Sent on ${formatDateDDMMYYYY(invoice.sentAt)}. Send it again if the client needs a copy with what is paid now.`
+              : 'Signed, stamped and paid, so the client copy can go out.'}
         </p>
-        {invoice.status === 'paid' && sendOpen ? (
+        {sendReady && sendOpen ? (
           <div className="mt-2 grid gap-2">
             <button
               type="button"
@@ -963,10 +929,10 @@ export function InvoiceView({ id, user, onBack, onDeleted, onEdit }: InvoiceView
               setError(null)
               setSendOpen(true)
             }}
-            disabled={invoice.status !== 'paid' || !signedByOwner}
+            disabled={!sendReady}
           >
             <Icon name="mail" size={16} />
-            Send invoice
+            {invoice.sentAt ? 'Send again' : 'Send invoice'}
           </button>
         )}
       </section>

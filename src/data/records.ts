@@ -572,10 +572,32 @@ export async function queuePickupDateChanged(
   })
 }
 
-/** The paid invoice PDF: one file, in Incoming Invoices, written once and never again. */
-export async function queuePaidInvoicePdf(invoice: Invoice, pdf: Blob, actor: { email: string }): Promise<void> {
+/** The time of day, HH-MM-SS, as a file name can carry it: no colons. */
+function hms(iso: string): string {
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return ''
+  const pad = (value: number) => String(value).padStart(2, '0')
+  return `${pad(date.getHours())}-${pad(date.getMinutes())}-${pad(date.getSeconds())}`
+}
+
+/**
+ * The invoice PDF, into Incoming Invoices (this task, item 2).
+ *
+ * The first copy keeps the invoice's own name and is written once. A later copy — made after
+ * another payment — is a file of its own, with the date and the time it was made in its name and a
+ * key of its own, so it lands beside the earlier ones. Nothing is ever replaced or deleted: a copy
+ * already in the folder stays exactly as it was uploaded.
+ */
+export async function queuePaidInvoicePdf(
+  invoice: Invoice,
+  pdf: Blob,
+  actor: { email: string },
+  againAt?: string,
+): Promise<void> {
+  const base = `${invoice.clientName || 'Client'} - ${ymd(invoice.createdAt)}`
+  const later = typeof againAt === 'string' && againAt !== ''
   const name = cleanFileName(
-    `${invoice.clientName || 'Client'} - ${ymd(invoice.createdAt)} - ${invoice.number}.pdf`,
+    later ? `${base} ${dmy(againAt)} ${hms(againAt)} - ${invoice.number}.pdf` : `${base} - ${invoice.number}.pdf`,
     'invoice.pdf',
   )
   await enqueueBlob({
@@ -586,8 +608,9 @@ export async function queuePaidInvoicePdf(invoice: Invoice, pdf: Blob, actor: { 
     mimeType: 'application/pdf',
     blob: pdf,
     sha256: await sha256Of(pdf),
-    // One key per invoice: the second Paid stamp cannot produce a second PDF.
-    key: `pdf:${invoice.number}`,
+    // The first copy carries the invoice's own key, so a second Paid stamp cannot write it twice.
+    // A later copy carries the moment it was made, so each one is its own file.
+    key: later ? `pdf:${invoice.number}:${againAt}` : `pdf:${invoice.number}`,
     label: 'Paid invoice PDF',
     writtenBy: actor.email,
   })

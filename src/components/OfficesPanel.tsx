@@ -235,7 +235,9 @@ export function OfficesPanel({ user, onBack }: OfficesPanelProps) {
 
   async function readInvites() {
     try {
-      setInvites(await listInvitesInDb(user.orgId))
+      // THIS TASK, ITEM 3: an email an owner or an admin has hidden stays out of the lists. The
+      // document is still there, so nothing about the person's access changes.
+      setInvites((await listInvitesInDb(user.orgId)).filter((invite) => !invite.clearedAt))
       setInviteRead('')
     } catch (cause) {
       setInviteRead(`The invites could not be read: ${writeReason(cause)}.`)

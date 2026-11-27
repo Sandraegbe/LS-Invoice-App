@@ -1673,10 +1673,11 @@ export async function withdrawPaidStamp(
 }
 
 /**
- * THE PAID TOGGLE ON A SAVED INVOICE. On: the stamp goes on, and only a confirmed payment
- * allows it — money on the invoice is what the stamp says. Off: a short reason is required,
- * handed back for the audit log. Either way every payment stays exactly where it is: turning
- * the stamp off takes the stamp off, not the money.
+ * THE PAID TOGGLE ON A SAVED INVOICE (this task, item 5): the owner and admins switch it on or off
+ * at any time — before a signature, after one, with a payment recorded or with none at all.
+ * Nothing is asked for: no amount and no confirmation about money, because the stamp alone is what
+ * this changes. Every payment stays exactly where it is, since turning the stamp off takes the
+ * stamp off and not the money.
  */
 export async function setPaidStamp(
   id: string,
@@ -1693,9 +1694,6 @@ export async function setPaidStamp(
   const at = nowIso()
   if (on) {
     if (existing.stampOn) return { invoice: existing, reason: '' }
-    if (existing.paidKobo <= 0) {
-      throw new Error('Record the payment in this card first: the stamp follows a confirmed payment.')
-    }
     const saved: Invoice = {
       ...existing,
       stampOn: true,
@@ -1708,9 +1706,8 @@ export async function setPaidStamp(
     await writeStore(current.map((invoice) => (invoice.id === id ? saved : invoice)))
     return { invoice: saved, reason: '' }
   }
-  const why = cleanText(reason, 200)
+  const why = cleanText(reason, 200) || 'Switched off by hand.'
   if (!existing.stampOn) return { invoice: existing, reason: why }
-  if (!why) throw new Error('Say why the stamp is coming off.')
   const saved: Invoice = { ...existing, stampOn: false, paidStampAt: null, updatedAt: at }
   await writeStore(current.map((invoice) => (invoice.id === id ? saved : invoice)))
   return { invoice: saved, reason: why }
@@ -1824,13 +1821,18 @@ export async function setPickupSignature(
 /* ------------------------------------------- this task: the owner's signature */
 
 /**
- * THE LINE EVERY SCREEN SAYS WHILE AN INVOICE HAS NO SIGNATURE (item 5). It is one string, used by
- * Record payment and by Send invoice alike, so the two can never drift apart.
+ * THE THREE THINGS A CLIENT'S COPY NEEDS (this task, item 2): the owner's signature, the PAID
+ * stamp switched on, and at least one payment recorded — in whatever order they happened. Send
+ * invoice is offered, and the PDF is queued for Incoming Invoices, exactly when all three are
+ * true. This returns the names of the ones still missing, so the screen can say which.
  */
-export const SIGNED_ONLY_MESSAGE = "Waiting for the owner's signature"
-
-/** What Delete signature says instead of deleting on an invoice that has been paid (item 1). */
-export const SIGNATURE_LOCKED_MESSAGE = 'A payment is recorded, so sign again instead.'
+export function sendBlockers(invoice: Invoice): string[] {
+  const missing: string[] = []
+  if (!isOwnerSigned(invoice)) missing.push("the owner's signature")
+  if (invoice.stampOn !== true) missing.push('the PAID stamp')
+  if (!hasRecordedPayment(invoice)) missing.push('a payment')
+  return missing
+}
 
 /**
  * THE LABEL OF A SIGNED INVOICE WITH NOTHING PAID YET (item 6): on the invoice itself and in every
@@ -1928,10 +1930,11 @@ export async function saveOwnerSignature(
 }
 
 /**
- * DELETE THE SIGNATURE (item 1) — and nothing else.
+ * DELETE THE SIGNATURE (this task, item 4) — and nothing else.
  *
- * Refused while a payment is recorded, with the exact sentence the owner asked for, because money
- * has been taken against this signature: signing again replaces it instead.
+ * Always available to the owner and to admins: before a payment, after one, and after the invoice
+ * has been sent. The card asks "Delete this signature?" before calling this; nothing here refuses
+ * on the strength of the money, and the payments themselves are never touched.
  */
 export async function deleteOwnerSignature(
   id: string,
@@ -1941,7 +1944,6 @@ export async function deleteOwnerSignature(
   const current = readStore()
   const existing = current.find((invoice) => invoice.id === id)
   if (!existing) throw new Error('That invoice is no longer saved.')
-  if (hasRecordedPayment(existing)) throw new Error(SIGNATURE_LOCKED_MESSAGE)
   return writeOwnerSignature(id, null)
 }
 
@@ -2321,20 +2323,17 @@ export async function addPayment(
 }
 
 /**
- * Send: hand the client their copy. Refused until the PAID stamp is on, which is
- * the phase 4 rule — an invoice goes out only when it is settled.
+ * Send: hand the client their copy (this task, item 2). The three things that copy needs — the
+ * owner's signature, the PAID stamp switched on, and at least one payment recorded — are checked
+ * here as well, so a refusal names the one that is missing instead of guessing.
  */
 export async function markSent(id: string): Promise<Invoice> {
   const current = readStore()
   const existing = current.find((invoice) => invoice.id === id)
   if (!existing) throw new Error('That invoice is no longer saved.')
-  if (!existing.paidStampAt || existing.status !== 'paid') {
-    throw new Error('Confirm the payment first: an invoice is sent only once it is paid in full.')
-  }
-  // THIS TASK, ITEM 5: an unsigned invoice is never sent. The screen says the plain sentence
-  // while it refuses, so nobody has to guess what is missing.
-  if (!isOwnerSigned(existing)) {
-    throw new Error(`${SIGNED_ONLY_MESSAGE}. Sign it on Edit invoice first.`)
+  const missing = sendBlockers(existing)
+  if (missing.length > 0) {
+    throw new Error(`Not ready to send yet: ${missing.join(', ')} ${missing.length === 1 ? 'is' : 'are'} missing.`)
   }
   // round 34: the first send is the one that counts. This used to stamp nowIso() again, which only
   // looked harmless because a second send in the same test run usually lands in the same millisecond;

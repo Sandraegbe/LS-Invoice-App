@@ -67,7 +67,10 @@ export function OwnershipPanel({ user, onBack }: OwnershipPanelProps) {
           readOwnership(),
           listPeopleStrict(user.orgId),
           ownerSignInMethod(),
-          listInvitesInDb(user.orgId).catch(() => [] as StaffInvite[]),
+          // THIS TASK, ITEM 3: a hidden email is left out of the waiting list; nothing is deleted.
+          listInvitesInDb(user.orgId)
+            .then((rows) => rows.filter((invite) => !invite.clearedAt))
+            .catch(() => [] as StaffInvite[]),
         ])
         if (!live) return
         setRecord(found)

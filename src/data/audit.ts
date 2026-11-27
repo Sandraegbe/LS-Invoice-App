@@ -27,6 +27,8 @@ export const AUDIT_ACTIONS = [
   'staff.permissions',
   'staff.revoked',
   'staff.removed',
+  // THIS TASK, ITEM 3: one email was hidden from the invite list. The log only ever gains lines.
+  'invite.hidden',
   'staff.disabled',
   'staff.enabled',
   'staff.role-admin',

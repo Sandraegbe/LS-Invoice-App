@@ -10,8 +10,12 @@
  * Every later payment queues a new "Payment" record with the same invoice number and its own
  * date. Nothing already in the Drive is ever edited or replaced.
  *
- * THIS TASK, ITEM 7: the PDF is queued for Incoming Invoices only when the invoice is signed as
- * well as paid. An unsigned invoice writes no PDF, however much has been paid against it.
+ * THIS TASK, ITEM 2: the PDF is queued for Incoming Invoices when the invoice is signed, carries
+ * the PAID stamp and has at least one payment recorded — all three, in whatever order they
+ * happened. Whichever of them arrives last is the one that queues the copy, so a signature saved or
+ * the stamp switched on runs through here too (see afterSignatureChange). After a later payment the
+ * fresh copy is a file of its own, with the date and the time in its name; nothing already in the
+ * folder is ever replaced or deleted.
  */
 
 import { buildInvoicePdf, type PdfLine, type PdfPhoto } from '../lib/pdf'
@@ -27,6 +31,7 @@ import {
   confirmPayment,
   findInvoice,
   isOwnerSigned,
+  sendBlockers,
   setDriveError,
   setDriveSyncStatus,
   type Invoice,
@@ -70,8 +75,10 @@ export interface HandoffResult {
 }
 
 /**
- * Everything a payment owes the Drive. `before` is the invoice as it stood before the payment
- * was recorded: the first PAID stamp is the change from not-paid to paid.
+ * Everything a payment owes the Drive — and, through `afterSignatureChange`, everything a signature
+ * or the PAID stamp owes it as well (this task, item 2). `before` is the invoice as it stood before
+ * the change, so a note can say whether this is the first money on the invoice or another payment
+ * on one that had already been paid something.
  */
 export async function afterPayment(
   before: Invoice,
@@ -95,14 +102,23 @@ export async function afterPayment(
     }
   }
 
-  // The PDF goes to Incoming Invoices ONCE, with the first payment on the invoice — a part
-  // payment writes it too, because the client has then paid something (this task, point 9).
-  //
-  // THIS TASK, ITEM 7: and only once the owner has signed it. Both halves are needed now —
-  // a signature alone sends nothing, and money alone sends nothing — so a client's invoice
-  // reaches the office's Incoming Invoices folder exactly when it is signed and paid.
-  const firstPayment = before.payments.length === 0 && after.payments.length > 0
-  if (!firstPayment || !isOwnerSigned(after)) return { notes, pdfQueued }
+  // THIS TASK, ITEM 2: the client's copy goes to Incoming Invoices when all three are true — the
+  // invoice is signed, the PAID stamp is on, and at least one payment is recorded — in whatever
+  // order they happened. Whichever of the three arrives last is the one that queues the copy, so
+  // this returns quietly while any of them is still missing.
+  const missing = sendBlockers(after)
+  const firstMoney = before.payments.length === 0
+  if (missing.length > 0) {
+    if (payment) {
+      notes.push(
+        `${firstMoney ? 'The client copy' : 'A newer client copy'} waits until ${missing.join(', ')} ${missing.length === 1 ? 'is' : 'are'} in place.`,
+      )
+    }
+    return { notes, pdfQueued }
+  }
+  // A copy already queued for this invoice makes this one a newer copy of the same invoice, and it
+  // carries the date and the time it was made in its name. The earlier copies are never touched.
+  const again = hasClientCopy(after)
 
   try {
     const paidLines: PdfLine[] = after.lines
@@ -180,13 +196,16 @@ export async function afterPayment(
       photos,
       note: after.pleaseNote || snapshot.pleaseNote,
     })
-    await queuePaidInvoicePdf(after, pdf, { email: actor.email })
+    await queuePaidInvoicePdf(after, pdf, { email: actor.email }, again ? nowIso() : undefined)
     pdfQueued = true
-    await releaseInvoiceImages(after.number)
+    // The photos are let go after the FIRST copy only: a newer copy still needs them inside it.
+    if (!again) await releaseInvoiceImages(after.number)
+    const photosPart =
+      photos.length > 0 ? `, with ${photos.length} photo${photos.length === 1 ? '' : 's'} inside it` : ''
     notes.push(
-      photos.length > 0
-        ? `The paid invoice PDF is queued for Incoming Invoices, with ${photos.length} photo${photos.length === 1 ? '' : 's'} inside it.`
-        : 'The paid invoice PDF is queued for Incoming Invoices.',
+      again
+        ? `A newer copy of the invoice PDF, with the date and time in its name, is queued for Incoming Invoices${photosPart}.`
+        : `The invoice PDF is queued for Incoming Invoices${photosPart}.`,
     )
   } catch (cause) {
     notes.push(
@@ -200,6 +219,29 @@ export async function afterPayment(
   if (pdfQueued || paymentQueued) await runSync().catch(() => undefined)
 
   return { notes, pdfQueued }
+}
+
+/**
+ * Is there already a copy of this invoice's PDF in the queue for Incoming Invoices? Read from the
+ * app's own sync queue, so a copy that is waiting, uploading, done or failed still counts as the
+ * first one — a newer copy is only ever made once a copy exists.
+ */
+function hasClientCopy(invoice: Invoice): boolean {
+  return listJobs().some((job) => job.invoiceNo === invoice.number && job.folder === 'incomingInvoices')
+}
+
+/**
+ * THE OTHER TWO DOORS TO THE SAME TRIGGER (this task, item 2). A signature that is saved, or the
+ * PAID stamp switched on, can be the third of the three things a client's copy needs. Both go
+ * through `afterPayment`, which checks all three and builds the PDF, so it makes no difference in
+ * which order a person signs, stamps and records a payment.
+ */
+export async function afterSignatureChange(
+  before: Invoice,
+  after: Invoice,
+  actor: { email: string; name: string },
+): Promise<HandoffResult> {
+  return afterPayment(before, after, actor, null, undefined)
 }
 
 function formatDay(iso: string): string {

@@ -48,6 +48,13 @@ export interface StaffInvite {
   invitedBy: string
   invitedAt: string
   updatedAt: string
+  /**
+   * THIS TASK, ITEM 3: when an owner or an admin hid this email from the invite list, and who did
+   * it. A hidden invite is left out of the list and nothing else: the document stays, the person
+   * keeps their access, and a new invite or switching them back on clears these two again.
+   */
+  clearedAt?: string
+  clearedBy?: string
 }
 
 /** The actions an admin may hand out: everything except running the staff list. */
@@ -165,6 +172,9 @@ export function inviteStaff(input: {
         disabled: false,
         invitedBy: input.invitedBy,
         updatedAt: nowIso(),
+        // A fresh invite brings a hidden email back to the list (this task, item 3).
+        clearedAt: undefined,
+        clearedBy: undefined,
       }
     : newInvite({ ...input, email })
   save(invite)
@@ -305,6 +315,8 @@ function inviteFromDocument(id: string, data: Record<string, unknown>): StaffInv
     invitedBy: typeof data.invitedBy === 'string' ? data.invitedBy : '',
     invitedAt: typeof data.invitedAt === 'string' ? data.invitedAt : '',
     updatedAt: typeof data.updatedAt === 'string' ? data.updatedAt : '',
+    clearedAt: typeof data.clearedAt === 'string' && data.clearedAt ? data.clearedAt : undefined,
+    clearedBy: typeof data.clearedBy === 'string' && data.clearedBy ? data.clearedBy : undefined,
   }
 }
 
@@ -347,26 +359,52 @@ export async function listInvitesInDb(orgId: string): Promise<StaffInvite[]> {
     .sort((a, b) => a.email.localeCompare(b.email))
 }
 
-/** Change an invite's ticks, switch it off, or close it for good, in the database. */
+/**
+ * Change an invite's ticks, switch it off, or close it for good, in the database. `cleared` hides
+ * the invite from the list (this task, item 3) and null brings it back; switching a person back on
+ * always brings it back, so a hidden email that is re-enabled shows up again.
+ */
 export async function updateInviteInDb(
   email: string,
-  patch: { permissions?: Permissions; disabled?: boolean; status?: InviteStatus },
+  patch: {
+    permissions?: Permissions
+    disabled?: boolean
+    status?: InviteStatus
+    cleared?: { at: string; by: string } | null
+  },
 ): Promise<void> {
   const key = inviteKey(email)
+  const clearing = patch.disabled === false ? null : patch.cleared
   const db = await firestoreDb()
   if (!db) {
     if (patch.permissions) setStaffPermissions(key, patch.permissions)
     if (patch.disabled !== undefined) setStaffDisabled(key, patch.disabled)
     if (patch.status === 'revoked') revokeStaff(key)
     if (patch.status === 'pending') reopenStaff(key)
+    if (clearing !== undefined) {
+      const invite = mustFind(key)
+      save({ ...invite, clearedAt: clearing?.at, clearedBy: clearing?.by, updatedAt: nowIso() })
+    }
     return
   }
-  const { doc, updateDoc } = await import('firebase/firestore')
+  const { deleteField, doc, updateDoc } = await import('firebase/firestore')
   const next: Record<string, unknown> = { updatedAt: nowIso() }
   if (patch.permissions) next.permissions = normalisePermissions(patch.permissions, 'staff')
   if (patch.disabled !== undefined) next.disabled = patch.disabled
   if (patch.status) next.status = patch.status
+  if (clearing !== undefined) {
+    next.clearedAt = clearing ? clearing.at : deleteField()
+    next.clearedBy = clearing ? clearing.by : deleteField()
+  }
   await updateDoc(doc(db, INVITES_COLLECTION, key), next)
+}
+
+/**
+ * THIS TASK, ITEM 3: hide one email from the invite list, for an owner or an admin. It writes the
+ * two fields and nothing else — no document is deleted, and nobody loses their access.
+ */
+export async function hideInvite(email: string, by: string): Promise<void> {
+  await updateInviteInDb(email, { cleared: { at: nowIso(), by: cleanText(by, 254).toLowerCase() } })
 }
 
 /** Take one invite out of the database, and wait for the answer. */

@@ -2,7 +2,7 @@
  * THE CONFIRM PAYMENT FORM (the PAYMENT brief)
  *
  * One form, used in two places: the Paid toggle on a saved invoice, and Record payment in the
- * Invoices list. Both open this, so a payment is recorded one way only, against the number of the
+ * Invoices list. Both open this, so money is entered one way only, against the number of the
  * invoice it belongs to.
  *
  * It shows the invoice number and the date it was issued (read-only), the invoice's lines as they

@@ -20,11 +20,10 @@
  */
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type PointerEvent } from 'react'
 import type { SignedInUser } from '../data/auth'
+import { afterSignatureChange } from '../data/handoff'
 import {
-  SIGNATURE_LOCKED_MESSAGE,
   deleteOwnerSignature,
   findInvoice,
-  hasRecordedPayment,
   saveOwnerSignature,
   useInvoicesVersion,
   type OwnerSignature,
@@ -93,8 +92,6 @@ export const OwnerSignatureCard = forwardRef<OwnerSignatureHandle, Props>(functi
   useInvoicesVersion()
   const invoiced = findInvoice(invoiceId)
   const signed: OwnerSignature | null = invoiced?.ownerSignature ?? null
-  /** Has a payment been recorded? Then the signature may be replaced, never deleted. */
-  const paid = invoiced ? hasRecordedPayment(invoiced) : false
   /** The pad is open: either nothing is signed yet, or Sign again was pressed. */
   const [drawing, setDrawing] = useState(false)
   /** How many strokes are on the pad. 0 means an empty pad and nothing to save. */
@@ -256,8 +253,9 @@ export const OwnerSignatureCard = forwardRef<OwnerSignatureHandle, Props>(functi
     setBusy(true)
     setError(null)
     setNote(null)
+    const before = findInvoice(invoiceId)
     try {
-      await saveOwnerSignature(
+      const saved = await saveOwnerSignature(
         invoiceId,
         { dataUrl },
         { email: user.email, name: user.name, role: user.role },
@@ -266,6 +264,9 @@ export const OwnerSignatureCard = forwardRef<OwnerSignatureHandle, Props>(functi
       setCount(0)
       setDrawing(false)
       setNote('Signature saved.')
+      // THIS TASK, ITEM 2: the signature can be the last of the three things a client's copy needs,
+      // so it runs the same trigger a payment runs, and nothing is said when it is not the last.
+      if (before) await afterSignatureChange(before, saved, { email: user.email, name: user.name })
       return true
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'The signature could not be saved.')
@@ -276,16 +277,12 @@ export const OwnerSignatureCard = forwardRef<OwnerSignatureHandle, Props>(functi
   }
 
   /**
-   * DELETE SIGNATURE (item 1). It asks first, and it is refused on an invoice that has a payment
-   * recorded — with the exact sentence the owner asked for — because money has been taken against
-   * this signature, so signing again is the way to change it.
+   * DELETE SIGNATURE (this task, item 4): always available to the owner and to admins, at any time
+   * — before a payment, after one, and after the invoice has been sent. It still asks "Delete this
+   * signature?" first, and then removes the drawing and nothing else.
    */
   async function remove() {
     if (busy) return
-    if (paid) {
-      setError(SIGNATURE_LOCKED_MESSAGE)
-      return
-    }
     if (!window.confirm('Delete this signature?')) return
     setBusy(true)
     setError(null)

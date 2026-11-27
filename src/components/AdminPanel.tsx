@@ -15,6 +15,7 @@ import {
 } from '../data/users'
 import {
   DELEGABLE_KEYS,
+  hideInvite,
   listInvitesInDb,
   personNameFor,
   removeInviteInDb,
@@ -221,6 +222,9 @@ export function AdminPanel({ user }: AdminPanelProps) {
       }))
     const known = new Set(logins.map((row) => row.email))
     const waiting: Row[] = invites
+      // THIS TASK, ITEM 3: an email an owner or an admin has hidden is left out of this list. Its
+      // document is untouched and the person keeps their access; a new invite brings it back.
+      .filter((invite) => !invite.clearedAt)
       .filter((invite) => !known.has(invite.email) && invite.email !== myEmail)
       .map((invite) => ({
         key: `invite:${invite.email}`,
@@ -262,6 +266,37 @@ export function AdminPanel({ user }: AdminPanelProps) {
       await load()
     } catch (cause) {
       setError(`Not saved: ${writeReason(cause)}`)
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  /**
+   * THIS TASK, ITEM 3: HIDE ONE EMAIL FROM THIS LIST.
+   *
+   * Offered on an invite that is accepted, revoked or expired — never on a live one, which is
+   * revoked first. It asks, then writes only `clearedAt` and `clearedBy` on invites/{email} and
+   * hides that one row. Nothing is deleted, nobody loses their access, and the audit log keeps its
+   * line, which is only ever added.
+   */
+  async function hideRow(row: Row) {
+    if (!window.confirm('Hide this email from the list?')) return
+    setBusy(row.key)
+    setError(null)
+    setMessage(null)
+    try {
+      await hideInvite(row.email, user.email)
+      writeAudit({
+        action: 'invite.hidden',
+        actorEmail: user.email,
+        orgId,
+        target: row.email,
+        detail: `${row.email} was hidden from the invite list. Their access is unchanged.`,
+      })
+      setMessage(`${row.email} is hidden from this list. They keep their access, and a new invite brings them back.`)
+      await load()
+    } catch (cause) {
+      setError(`Not hidden: ${writeReason(cause)}`)
     } finally {
       setBusy(null)
     }
@@ -541,6 +576,19 @@ export function AdminPanel({ user }: AdminPanelProps) {
                   >
                     Remove
                   </button>
+                  {/* THIS TASK, ITEM 3: Hide, on an invite that is no longer live only. A pending
+                      invite has Revoke first and no Hide, so nobody hides a person who is about to
+                      sign in. */}
+                  {row.kind === 'invite' && row.status !== 'pending' ? (
+                    <button
+                      type="button"
+                      className="btn-line admin-small"
+                      onClick={() => void hideRow(row)}
+                      disabled={busy === row.key}
+                    >
+                      Hide
+                    </button>
+                  ) : null}
                 </div>
 
                 {row.email === myEmail ? (
