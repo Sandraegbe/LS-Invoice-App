@@ -64,12 +64,14 @@ import { queuePickupRecords } from '../data/pickupRecords'
 import { writeAudit } from '../data/audit'
 import { SectionBoundary } from './SectionBoundary'
 import { dayOf } from '../data/records'
-import { lineNameOf, pickupLabel, pickupStatusOf, speedLabel, PICKUP_STATUSES } from '../data/pickup'
+import { lineNameOf, pickupLabel, pickupStatusOf, speedLabel, PICKUP_STATUSES, type PickupStatus } from '../data/pickup'
 import {
   addSavedName,
   assigneesLabel,
   assigneesOf,
   assignedRows,
+  paidLines,
+  qualifies,
   readPlace,
   readSign,
   loadSavedNames,
@@ -1279,6 +1281,8 @@ function PickupSection({
   const [result, setResult] = useState<{ ok: boolean; text: string; key: string } | null>(null)
   /** The collection being saved right now, so only that card says "Saving…". */
   const [saving, setSaving] = useState('')
+  /** PHASE 61, PART A, ITEM 3: which of the three figures has been opened, if any. */
+  const [openFigure, setOpenFigure] = useState<PickupStatus | ''>('')
   /** Clear and Undo last stroke, one per open pad, so each card works on its own drawing. */
   const pads = useRef<Record<string, SignActions | null>>({})
   /** The person handing the item over is the one signed in, so the form does not ask again. */
@@ -1312,6 +1316,30 @@ function PickupSection({
     returns.filter((shipment) => shipment.status !== 'received').map((shipment) => shipment.lineId),
   )
   const atHome = (line: InvoiceLine) => !away.has(line.id)
+
+  /**
+   * PHASE 61, PART A, ITEMS 1 AND 2 — WHERE A LINE STANDS, WORKED OUT FROM THE LINE ITSELF.
+   *
+   * Collected: a collection was saved for it. Ready: Work approved is on and it is not collected.
+   * In office: Work approved is off and it is not collected. Nothing stored is read for this, so
+   * switching Work approved on makes the line Ready everywhere at once, and switching it off puts
+   * it back In office.
+   */
+  const placeOf = (line: InvoiceLine): PickupStatus =>
+    pickupStatusOf(line) === 'collected' ? 'collected' : line.workApproved === true ? 'ready' : 'in-office'
+
+  /* PHASE 61, PART A, ITEM 1: the three figures are counted from the same paid lines of the same
+     qualifying invoices the two sections are built from, and a line that is away at another office
+     or on its way back counts in none of them. They are worked out again from the lines on every
+     render — the invoices and the shipments are already live on this screen (useInvoicesVersion and
+     subscribeShipments), so a change anywhere shows up here by itself. No stored total is used. */
+  const countedRows = invoices
+    .filter(qualifies)
+    .flatMap((invoice) => paidLines(invoice).map((line) => ({ invoice, line, place: placeOf(line) })))
+  const awayRows = countedRows.filter((row) => away.has(row.line.id))
+  const hereRows = countedRows.filter((row) => !away.has(row.line.id))
+  /** The rows one figure counts, in the order the cards are listed. */
+  const figureOf = (where: PickupStatus) => hereRows.filter((row) => row.place === where)
 
   function retryReturns() {
     setReturnsProblem(null)
@@ -1746,19 +1774,59 @@ function PickupSection({
         />
       ))}
 
+      {/* PHASE 61, PART A: the three figures are counted from the very rows the two sections are
+          built from — the paid lines of the invoices that qualify, exactly as Assigned defines both
+          — and a line that is away at another sub account, or on its way back, counts in none of
+          them. Nothing stored is trusted: they are worked out again from the lines each render. */}
       <div className="grid grid-cols-3 gap-2">
         {PICKUP_STATUSES.map((where) => {
-          const count = invoices
-            .flatMap((invoice) => invoice.lines)
-            .filter((line) => pickupStatusOf(line) === where.id).length
+          const rows = figureOf(where.id)
+          const open = openFigure === where.id
           return (
-            <div key={where.id} className="rounded-md border border-line bg-white p-2 text-center">
-              <strong className="block text-[16px]">{count}</strong>
+            <button
+              key={where.id}
+              type="button"
+              className="rounded-md border border-line bg-white p-2 text-center"
+              aria-pressed={open}
+              aria-label={`${rows.length} ${where.label}. Press to list the items this counts.`}
+              onClick={() => setOpenFigure(open ? '' : where.id)}
+            >
+              <strong className="block text-[16px]">{rows.length}</strong>
               <span className="text-[11px] text-muted">{where.label}</span>
-            </div>
+            </button>
           )
         })}
       </div>
+
+      {/* The figure that was pressed, opened: exactly the lines it counted, so it can be checked. */}
+      {openFigure ? (
+        <div className={PANEL}>
+          <h3 className="text-[14px] font-semibold">
+            {pickupLabel(openFigure)} · {figureOf(openFigure).length}
+          </h3>
+          {figureOf(openFigure).length === 0 ? (
+            <p className={SMALL}>Nothing is in this figure right now.</p>
+          ) : (
+            <ul className="space-y-1">
+              {figureOf(openFigure).map((row) => (
+                <li
+                  key={`${row.invoice.id}:${row.line.id}`}
+                  className="flex flex-wrap items-baseline gap-x-2 border-t border-line pt-1"
+                >
+                  <span className="tag">{row.invoice.number || 'No number yet'}</span>
+                  <strong className="text-[13px]">{row.invoice.clientName || 'Client'}</strong>
+                  <span className="text-[13px]">{lineNameOf(row.line)}</span>
+                  <span className="tag">{pickupLabel(row.place)}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      ) : null}
+
+      {awayRows.length > 0 ? (
+        <p className={SMALL}>{awayRows.length} items are away at other offices.</p>
+      ) : null}
 
       {collections.length > 0 ? (
         <div className={PANEL}>
@@ -1807,7 +1875,7 @@ function PickupSection({
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
                 <strong className="text-[13px]">{card.invoice.clientName || 'Client'}</strong>
                 <span className={SMALL}>{card.invoice.number}</span>
-                <span className="tag">{pickupLabel(pickupStatusOf(card.line))}</span>
+                <span className="tag">{pickupLabel(placeOf(card.line))}</span>
               </div>
               <p className="text-[13px]">{lineNameOf(card.line)}</p>
               <p className={SMALL}>{card.line.description || 'No work written down'}</p>

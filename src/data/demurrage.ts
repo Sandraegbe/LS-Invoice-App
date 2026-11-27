@@ -8,9 +8,11 @@
  * THE RULES IT ENCODES, in the order they were given:
  *
  * 1. The clock runs from the invoice's own date created, day 1 being that date, and it never
- *    resets. The fee starts on the day after the grace days — day 4 with three grace days — and
- *    it is one amount for the whole invoice, never per line: days x the invoice's own daily
- *    rate. A settled invoice stops, and what it reached stays on record (rule 5).
+ *    resets. The day of creation, the grace days after it and one more day are free, so with three
+ *    grace days an invoice created on 22-11-2026 is free until 26-11-2026 and the fee starts on
+ *    27-11-2026 — day 6 of its life. It is one amount for the whole invoice, never per line: days
+ *    x the invoice's own daily rate. A settled invoice stops, and what it reached stays on record
+ *    (rule 5). Days are calendar dates in Africa/Lagos, never 24-hour periods.
  * 2. A new client, or one with five previous invoices or fewer, is under demurrage without
  *    anyone deciding. One invoice id is one touch, however many payments it carries.
  * 3. Above five previous invoices only an admin decides, and the decision lives on the client.
@@ -27,7 +29,7 @@ import type { Invoice } from './invoices'
 
 /** The fee's two numbers, as Settings holds them and as each invoice keeps its own copy. */
 export interface DemurrageTerms {
-  /** Whole days with no fee before the clock starts: 3 means the fee starts on day 4. */
+  /** Whole days with no fee after the day of creation: 3 means three free days after it. */
   graceDays: number
   /** What one day costs the whole invoice, in kobo. 100000 kobo is ₦1,000. */
   dailyRateKobo: number
@@ -79,18 +81,56 @@ export interface DemurrageFacts {
   touches: number
   /** The day the clock counts from, as YYYY-MM-DD. */
   from: string
+  /** PHASE 61, PART B: the last day with no fee, and the first day it is charged, as YYYY-MM-DD. */
+  lastFreeDay: string
+  firstChargedDay: string
 }
 
 const DAY_MS = 86_400_000
+
+/**
+ * PHASE 61, PART B: the calendar the whole fee is counted on. Every day here is a calendar date in
+ * Africa/Lagos — the day the person is living in — never a 24-hour period and never UTC's own date.
+ */
+const CLOCK_ZONE = 'Africa/Lagos'
 
 function wholeDay(year: number, month: number, day: number): number {
   return Math.round(Date.UTC(year, month, day) / DAY_MS)
 }
 
+/** The date it is in Africa/Lagos at that moment, as a whole-day index. */
+function lagosDayIndex(at: Date): number {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: CLOCK_ZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(at)
+  const part = (kind: string) => Number(parts.find((piece) => piece.type === kind)?.value ?? '0')
+  return wholeDay(part('year'), part('month') - 1, part('day'))
+}
+
+/** A whole-day index back to the date a person reads, as YYYY-MM-DD. */
+function dayString(index: number): string {
+  const at = new Date(index * DAY_MS)
+  const month = String(at.getUTCMonth() + 1).padStart(2, '0')
+  const day = String(at.getUTCDate()).padStart(2, '0')
+  return `${at.getUTCFullYear()}-${month}-${day}`
+}
+
+/**
+ * The whole-day index of a stored date. A date on its own (2026-11-22) is taken as that very date;
+ * a moment in time (a full ISO stamp) is read as the date it was in Africa/Lagos.
+ */
 function dayIndexOf(value: string): number | null {
-  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(value ?? '')
-  if (!match) return null
-  return wholeDay(Number(match[1]), Number(match[2]) - 1, Number(match[3]))
+  const text = (value ?? '').trim()
+  if (!text) return null
+  const plain = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text)
+  if (plain) return wholeDay(Number(plain[1]), Number(plain[2]) - 1, Number(plain[3]))
+  const at = new Date(text)
+  if (!Number.isNaN(at.getTime())) return lagosDayIndex(at)
+  const loose = /^(\d{4})-(\d{2})-(\d{2})/.exec(text)
+  return loose ? wholeDay(Number(loose[1]), Number(loose[2]) - 1, Number(loose[3])) : null
 }
 
 function rounded(value: unknown, fallback: number): number {
@@ -106,8 +146,7 @@ export function demurrageStart(invoice: Invoice): string {
 export function demurrageDay(invoice: Invoice, today: Date = new Date()): number {
   const start = dayIndexOf(demurrageStart(invoice))
   if (start === null) return 1
-  const now = wholeDay(today.getFullYear(), today.getMonth(), today.getDate())
-  return Math.max(1, now - start + 1)
+  return Math.max(1, lagosDayIndex(today) - start + 1)
 }
 
 /**
@@ -121,6 +160,54 @@ export function demurrageTerms(invoice: Invoice): DemurrageTerms {
     graceDays: rounded(invoice.demurrageGraceDays ?? saved.demurrageGraceDays, DEFAULT_DEMURRAGE.graceDays),
     dailyRateKobo: rounded(invoice.demurrageRateKobo ?? saved.demurrageFeeKobo, DEFAULT_DEMURRAGE.dailyRateKobo),
   }
+}
+
+/**
+ * PHASE 61, PART B, ITEM 1 — WHEN THE FEE STARTS, DECIDED IN THIS ONE PLACE.
+ *
+ * The day the invoice was created is free, the grace days that follow it are free, and one more
+ * day is free as well. So the last free day is the date created plus the grace days plus one
+ * calendar day, and the fee starts on the day after it. With three grace days, an invoice created
+ * on 22-11-2026 is free until 26-11-2026 and is charged from 27-11-2026.
+ *
+ * Everything else reads these three functions, so no screen can hold a different rule.
+ */
+const FREE_DAYS_AFTER_GRACE = 1
+
+/** The invoice's own date created plus its grace days, as a whole-day index, or null. */
+function lastFreeIndex(invoice: Invoice): number | null {
+  const start = dayIndexOf(demurrageStart(invoice))
+  if (start === null) return null
+  return start + demurrageTerms(invoice).graceDays + FREE_DAYS_AFTER_GRACE
+}
+
+/** The invoice's own date created, as the calendar date the clock counts from (YYYY-MM-DD). */
+export function demurrageStartDay(invoice: Invoice): string {
+  const index = dayIndexOf(demurrageStart(invoice))
+  return index === null ? '' : dayString(index)
+}
+
+/** The last day with no fee, as YYYY-MM-DD; '' when the invoice has no date to count from. */
+export function demurrageLastFreeDay(invoice: Invoice): string {
+  const index = lastFreeIndex(invoice)
+  return index === null ? '' : dayString(index)
+}
+
+/** The first day the fee is charged, as YYYY-MM-DD; '' when there is no date to count from. */
+export function demurrageFirstChargedDay(invoice: Invoice): string {
+  const index = lastFreeIndex(invoice)
+  return index === null ? '' : dayString(index + 1)
+}
+
+/**
+ * How many calendar days of fee have built up by `at`: none at all up to and including the last
+ * free day, then one for every day from the first charged day up to and including `at`. Counted in
+ * Africa/Lagos calendar dates, never in 24-hour periods.
+ */
+export function demurrageChargedDays(invoice: Invoice, at: Date = new Date()): number {
+  const index = lastFreeIndex(invoice)
+  if (index === null) return 0
+  return Math.max(0, lagosDayIndex(at) - index)
 }
 
 /** A line marked "Not paid" is money the business has not received, and it keeps the clock on. */
@@ -171,7 +258,9 @@ export function demurrageFacts(
     terms,
     day,
     touches,
-    from: demurrageStart(invoice).slice(0, 10),
+    from: demurrageStartDay(invoice),
+    lastFreeDay: demurrageLastFreeDay(invoice),
+    firstChargedDay: demurrageFirstChargedDay(invoice),
     decidedBy: invoice.demurrageDecidedBy ?? '',
     decidedAt: invoice.demurrageDecidedAt ?? '',
     note: invoice.demurrageNote ?? '',
@@ -200,20 +289,25 @@ export function demurrageFacts(
   // it reached is the one kept on the invoice.
   if (isFullyPaid(invoice)) {
     const stoppedAt = invoice.demurrageStoppedAt ?? invoice.paymentConfirmedAt ?? ''
-    const stopDay = stoppedAt ? demurrageDay(invoice, new Date(stoppedAt)) : day
-    const days = invoice.demurrageDays > 0 ? invoice.demurrageDays : Math.max(0, stopDay - terms.graceDays)
+    // PHASE 61, PART B, ITEM 2: an amount already recorded on a paid invoice is never rewritten.
+    // Only an invoice with nothing recorded has it counted, by the one rule above.
+    const days =
+      invoice.demurrageDays > 0
+        ? invoice.demurrageDays
+        : demurrageChargedDays(invoice, stoppedAt ? new Date(stoppedAt) : today)
     const kept = invoice.demurrageKobo > 0 ? invoice.demurrageKobo : Math.round(days * terms.dailyRateKobo)
     return { ...resting, state: 'settled', days, feeKobo: kept, graceLeft: 0, stoppedAt }
   }
-  // Rule 1: the free days first, then day after day on the original clock.
-  const days = Math.max(0, day - terms.graceDays)
+  // Rule 1: the free days first, then day after day on the original clock. The free days are the day
+  // of creation, the grace days after it and one more day — all decided by demurrageChargedDays.
+  const days = demurrageChargedDays(invoice, today)
   if (days === 0) {
     return {
       ...resting,
       state: 'grace',
       days: 0,
       feeKobo: 0,
-      graceLeft: Math.max(0, terms.graceDays - day + 1),
+      graceLeft: Math.max(0, terms.graceDays + 3 - day),
       stoppedAt: '',
     }
   }

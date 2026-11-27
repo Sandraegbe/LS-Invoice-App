@@ -29,6 +29,15 @@ import { useDraft, useScrollMemory } from '../lib/drafts'
 type DemurrageTab = 'active' | 'pending' | 'not-charged'
 
 /**
+ * PHASE 61, PART B, ITEM 3: a stored date read the way the person writes it — 22-11-2026, never
+ * 2026-11-22. It is a calendar date already counted in Africa/Lagos, so nothing is shifted here.
+ */
+function dmyDate(value: string): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(value ?? '')
+  return match ? `${match[3]}-${match[2]}-${match[1]}` : ''
+}
+
+/**
  * PHASE 38, ITEM 5b: the amount a person types, read as naira and kept as kobo. Anything that is
  * not a number reads as zero, and the invoice's own store refuses a fee without a note.
  */
@@ -405,11 +414,12 @@ function DemurrageRow({
             {invoice.number || 'No number yet'} · {name}
           </p>
           <p className="text-[11px] text-muted">
-            {STATE_WORDS[facts.state]} · day {facts.day}
+            {STATE_WORDS[facts.state]}
             {facts.state === 'grace'
-              ? ` · the fee starts in ${facts.graceLeft} ${facts.graceLeft === 1 ? 'day' : 'days'}`
-              : null}
-            {facts.days > 0 ? ` · ${facts.days} ${facts.days === 1 ? 'day' : 'days'} counted` : null}
+              ? ` · Free until ${dmyDate(facts.lastFreeDay)}. The fee starts on ${dmyDate(facts.firstChargedDay)}.`
+              : facts.days > 0
+                ? ` · Fee counting since ${dmyDate(facts.firstChargedDay)}. ${facts.days} ${facts.days === 1 ? 'day' : 'days'}.`
+                : ` · day ${facts.day}`}
           </p>
         </div>
         <div className="text-right">
@@ -425,7 +435,8 @@ function DemurrageRow({
 
       <p className="mt-1 text-[11px] leading-4 text-muted">
         {formatNaira(facts.terms.dailyRateKobo)} a day, with {facts.terms.graceDays} grace{' '}
-        {facts.terms.graceDays === 1 ? 'day' : 'days'}, from {facts.from || 'the day it was created'}
+        {facts.terms.graceDays === 1 ? 'day' : 'days'}, from{' '}
+        {dmyDate(facts.from) || 'the day it was created'}
         {facts.touches > 0
           ? ` · this client has ${facts.touches} other ${facts.touches === 1 ? 'invoice' : 'invoices'}`
           : ' · this client has no other invoices'}

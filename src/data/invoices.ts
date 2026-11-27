@@ -52,7 +52,7 @@ import { firestoreDb } from '../lib/firebase'
 import { currentOfficeId, emptyOfficeSnapshot, findOffice, inScope, officeOf, officeOfRecord, officeScopeForQuery, officeSnapshotFor, sameBusiness, writingOffice, type OfficeSnapshot } from './offices'
 import { readSettings, type BusinessSettings } from './settings'
 import {
-  demurrageDay,
+  demurrageChargedDays,
   demurrageTerms,
   hasUnpaidLine,
   isFullyPaid,
@@ -65,7 +65,7 @@ export const COUNTER_DOCUMENT = 'counters/invoices'
 
 // Phase 8: the three places an item can be. The words and the counting live in ./pickup, so the
 // invoice, the pickup list and the Assigned Invoices tab cannot say different things.
-import type { PickupStatus } from './pickup'
+import { pickupStatusOf, type PickupStatus } from './pickup'
 
 export type InvoiceStatus = 'unpaid' | 'part-paid' | 'paid'
 
@@ -1422,7 +1422,9 @@ function demurrageAfterPayment(
   status: InvoiceStatus,
 ): Partial<Invoice> {
   const terms = demurrageTerms(existing)
-  const reached = Math.max(0, demurrageDay(existing, new Date(at)) - terms.graceDays)
+  // PHASE 61, PART B: the one rule decides the days here too, so a payment can never be charged
+  // from an earlier day than the screen shows.
+  const reached = demurrageChargedDays(existing, new Date(at))
   const stopped = status === 'paid' && !hasUnpaidLine(existing)
   const cleared = {
     demurrageCharge: 'dont-charge' as DemurrageCharge,
@@ -2126,6 +2128,15 @@ export async function setWorkApproved(
           workApproved: approved,
           workApprovedBy: approved ? who : line.workApprovedBy,
           workApprovedAt: approved ? at : line.workApprovedAt,
+          // PHASE 61, PART A, ITEM 2: the line's pick-up place follows the switch. On is Ready, off
+          // is In office — but a line already collected stays collected, because collecting it does
+          // not stop being true. Nothing is written for a line that is away: the guard above has
+          // already refused that, and the Received press is what books it.
+          pickupStatus: (pickupStatusOf(line) === 'collected'
+            ? 'collected'
+            : approved
+              ? 'ready'
+              : 'in-office') as PickupStatus,
         }
       : line,
   )
