@@ -18,6 +18,7 @@
 
 import { useEffect, useState } from 'react'
 import { whenText } from '../data/drive'
+import { listOffices } from '../data/offices'
 import { SharedDriveCard } from './SharedDriveCard'
 import {
   formatSize,
@@ -29,6 +30,7 @@ import {
   subscribeSync,
   summarise,
   listJobs,
+  watchQueues,
   type SyncJob,
 } from '../data/sync'
 
@@ -80,6 +82,24 @@ export function DrivePanel({
     setJobs(listJobs())
     return stop
   }, [])
+  /**
+   * PHASE 63, item 2: the list is read from Firestore, live — this office's own document, or every
+   * office's in "All offices" — so the count on a phone and the count on a PC are the same number.
+   */
+  useEffect(() => {
+    let stop: (() => void) | null = null
+    let live = true
+    const ids = inside ? [officeId] : listOffices(orgId).filter((one) => one.active).map((one) => one.id)
+    void (async () => {
+      const off = await watchQueues(ids.filter((id) => id !== ''))
+      if (live) stop = off
+      else off()
+    })()
+    return () => {
+      live = false
+      if (stop) stop()
+    }
+  }, [inside, officeId, orgId])
 
   /*
    * PHASE 45 — inside one office this card speaks for that office alone. A record with no office of
@@ -102,14 +122,13 @@ export function DrivePanel({
       canDisconnect={canDisconnect}
     >
       {showSync ? (
-        canManage ? (
-          <>
-            <div className="flex items-center justify-between gap-2">
+        <>
+          <div className="flex items-center justify-between gap-2">
               <p className="text-[13px] font-semibold">Sync</p>
               <p className="text-[12px] text-ink-soft/60">{counts}</p>
             </div>
 
-            {summary.failed > 0 ? (
+            {canManage && summary.failed > 0 ? (
               <button type="button" className="chip mt-2" onClick={() => void retryAllFailed()}>
                 Try them all again
               </button>
@@ -141,7 +160,7 @@ export function DrivePanel({
                                   : ''}
                               </span>
                             </span>
-                            {job.status === 'failed' ? (
+                            {canManage && job.status === 'failed' ? (
                               <button
                                 type="button"
                                 className="shrink-0 text-[12px] text-gold-deep underline"
@@ -167,11 +186,7 @@ export function DrivePanel({
                 deleted from it.
               </p>
             ) : null}
-          </>
-        ) : (
-          /* A sub user reads their own office's counts and nothing else. */
-          <p className="text-[12px] text-ink-soft/60">{counts}</p>
-        )
+        </>
       ) : null}
     </SharedDriveCard>
   )

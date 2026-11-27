@@ -1,5 +1,11 @@
-import { readFileSync } from 'node:fs'
-const css = readFileSync('dist/assets/index-7HwNT8Jm.css', 'utf8')
-const probes = ['#737373', '6b7b8c', '#ffc107', 'ffa900', '#308df8', 'hero-figure', 'nav-account', 'slider-hint']
-for (const p of probes) console.log(p, css.includes(p))
-console.log('bytes', css.length)
+import { readFileSync, statSync } from 'node:fs'
+
+const path = process.argv[2]
+console.log('cwd      ', process.cwd())
+console.log('path     ', path)
+console.log('size     ', statSync(path).size)
+const text = readFileSync(path, 'utf8')
+console.log('chars    ', text.length)
+console.log('first    ', JSON.stringify(text.slice(0, 60)))
+console.log('lines    ', text.split('\n').length)
+console.log('matches  ', text.split('\n').filter((line) => line.includes('import')).length)

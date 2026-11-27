@@ -63,10 +63,16 @@ export const SUB_FOLDER_KEYS: FolderKey[] = [
 /** The one root folder inside the shared Google account. */
 export const SHARED_ROOT_NAME = 'LS Invoice Files'
 
+/**
+ * PHASE 63 — ONE RECORD PER OFFICE, never one record for the business.
+ *
+ * The document id of a connection is the office's own id, so driveConnections/office_lagos is
+ * Lagos's connection and driveConnections/office_ph is PH's. Nothing is ever read or written under
+ * a fixed id, and there is no default record to fall back to: an office with no document is
+ * "Not connected", full stop.
+ */
 const CONNECTION_COLLECTION = 'driveConnections'
-const CONNECTION_DOC = 'subAccounts'
 const FOLDERS_COLLECTION = 'driveFolders'
-const CACHE_KEY = 'ls-invoice.drive-shared'
 
 /** How long a press waits for the Google window to finish before giving up politely. */
 const WAIT_FOR_CONSENT_MS = 180_000
@@ -131,38 +137,29 @@ export function openFolderUrl(folderId: string): string {
 
 /* ------------------------------------------------------------- what this device remembers */
 
+/* ------------------------------------------------------- what this session has already read */
+
+/**
+ * PHASE 63 — NOTHING ABOUT THE DRIVE IS KEPT IN THE BROWSER.
+ *
+ * This used to be a localStorage record (ls-invoice.drive-shared), which meant a phone could show
+ * "Connected as …" for an account that had since been disconnected, and two devices could disagree.
+ * The connection and the folder ids now come from Firestore and from the Worker only; this map just
+ * saves asking twice within the same page load, and it is gone when the tab is.
+ */
 interface Cache {
   connection: SharedConnection | null
   folders: Record<string, SubFolders>
 }
 
-function emptyCache(): Cache {
-  return { connection: null, folders: {} }
-}
+let cache: Cache = { connection: null, folders: {} }
 
 function readCache(): Cache {
-  if (typeof window === 'undefined') return emptyCache()
-  try {
-    const raw = window.localStorage.getItem(CACHE_KEY)
-    if (!raw) return emptyCache()
-    const parsed = JSON.parse(raw) as Partial<Cache>
-    return {
-      connection: isConnection(parsed.connection) ? parsed.connection : null,
-      folders: parsed.folders && typeof parsed.folders === 'object' ? (parsed.folders as Record<string, SubFolders>) : {},
-    }
-  } catch {
-    return emptyCache()
-  }
+  return cache
 }
 
 function writeCache(next: Cache): Cache {
-  if (typeof window !== 'undefined') {
-    try {
-      window.localStorage.setItem(CACHE_KEY, JSON.stringify(next))
-    } catch {
-      /* storage blocked: the records still live in Firestore */
-    }
-  }
+  cache = next
   return next
 }
 
@@ -189,17 +186,21 @@ export function rememberedSubFolders(officeId: string): SubFolders | null {
 
 /* --------------------------------------------------------------------- the two records */
 
-/** The shared connection, from Firestore first, then from what this device remembers. */
-export async function loadSharedConnection(orgId = ''): Promise<SharedConnection | null> {
+/**
+ * The connection of ONE office, read from its own record driveConnections/{officeId}.
+ *
+ * Never a shared record and never a fallback: with no office id there is nothing to read, and an
+ * office with no document is "Not connected". Nothing is remembered in the browser, so a phone
+ * cannot show yesterday's account.
+ */
+export async function loadSharedConnection(officeId = ''): Promise<SharedConnection | null> {
+  if (!officeId) return null
   const db = await firestoreDb()
-  if (!db) return rememberedConnection()
+  if (!db) return null
   try {
     const { doc, getDoc } = await import('firebase/firestore')
-    const found = await getDoc(doc(db, CONNECTION_COLLECTION, CONNECTION_DOC))
-    if (!found.exists()) {
-      writeCache({ ...readCache(), connection: null })
-      return null
-    }
+    const found = await getDoc(doc(db, CONNECTION_COLLECTION, officeId))
+    if (!found.exists()) return null
     const data = found.data() as Record<string, unknown>
     const connection: SharedConnection = {
       orgId: String(data.orgId ?? ''),
@@ -207,47 +208,95 @@ export async function loadSharedConnection(orgId = ''): Promise<SharedConnection
       rootFolderId: String(data.rootFolderId ?? ''),
       connectedAt: String(data.connectedAt ?? ''),
     }
-    if (!connection.email || !connection.rootFolderId) return rememberedConnection()
-    if (orgId && connection.orgId && connection.orgId !== orgId) return null
-    writeCache({ ...readCache(), connection })
+    // PHASE 63: no comparison of emails, ever. Any Google account is allowed here, including the
+    // same one another office uses; the record simply says who this office is connected as.
+    if (!connection.email || !connection.rootFolderId) return null
+    const known = readCache()
+    writeCache({ ...known, connection })
     return connection
   } catch {
-    // Offline, or the rules refused the read: what this device remembers still stands.
-    return rememberedConnection()
+    // Offline, or the rules refused the read: the card says Not connected rather than guessing.
+    return null
   }
 }
 
-/* ----------------------------- one Google account, one folder set for each office (phase 54) */
+/**
+ * PHASE 63 — watch one office's connection, LIVE.
+ *
+ * The Drive card and every screen that shows Drive state use this instead of reading once, so
+ * "Connected as …" turns into "Not connected" (or the reverse) on every open device within a
+ * second of the record changing, with no refresh and no reload.
+ */
+export async function subscribeSharedConnection(
+  officeId: string,
+  listener: (connection: SharedConnection | null) => void,
+): Promise<() => void> {
+  if (!officeId) {
+    listener(null)
+    return () => undefined
+  }
+  const db = await firestoreDb()
+  if (!db) {
+    listener(null)
+    return () => undefined
+  }
+  const { doc, onSnapshot } = await import('firebase/firestore')
+  return onSnapshot(
+    doc(db, CONNECTION_COLLECTION, officeId),
+    (snapshot) => {
+      if (!snapshot.exists()) {
+        listener(null)
+        return
+      }
+      const data = snapshot.data() as Record<string, unknown>
+      const candidate: SharedConnection = {
+        orgId: String(data.orgId ?? ''),
+        email: String(data.email ?? ''),
+        rootFolderId: String(data.rootFolderId ?? ''),
+        connectedAt: String(data.connectedAt ?? ''),
+      }
+      const connection = isConnection(candidate) && candidate.email && candidate.rootFolderId ? candidate : null
+      const known = readCache()
+      writeCache({ ...known, connection })
+      listener(connection)
+    },
+    () => listener(null),
+  )
+}
+
+/* --------------------------------- one Google account each, one folder set for each office (63) */
 
 /**
- * PHASE 54 — ONE GOOGLE ACCOUNT, A FOLDER SET FOR EACH OFFICE.
+ * PHASE 63 — EVERY OFFICE HAS ITS OWN CONNECTION RECORD.
  *
- * The connection stays the single business-wide record, driveConnections/subAccounts: one document,
- * a fixed id, never an office's name. Every office reads that same record, which is exactly why
- * Lagos connecting shows PH as Connected too, and the reverse.
+ * driveConnections/{officeId} holds that office's own account: the address the card reads, and the
+ * root folder id. Lagos and PH may be the same Google account or two different ones — nothing here
+ * compares them, warns about them or blocks one because of the other. An office with no document
+ * has simply never been connected, and its files wait in its own queue until somebody with Drive
+ * permission connects it.
  *
- * What belongs to one office is its FOLDER SET: driveFolders/{officeId}, whose document id is the
- * office's ID and never its name, so renaming an office changes nothing and can never make a second
- * set. An office therefore sees its own folder set and its own sync summary, never another's. The
- * Google key itself never leaves the Worker.
+ * What belongs to one office alone is also its folder set, driveFolders/{officeId}, whose document
+ * id is the office's ID and never its name, so renaming an office changes nothing and can never
+ * make a second set. The Google key itself never leaves the Worker.
  */
 
-/*
- * There is no per-office connection record to read: the connection is shared, so the cards read
- * driveConnections/subAccounts through loadSharedConnection above, and only the folders below are
- * per office.
- */
-
-/** Write the connection record. Only an owner or an admin may; the rules refuse everyone else. */
-export async function saveSharedConnection(connection: SharedConnection): Promise<void> {
-  writeCache({ ...readCache(), connection })
+/** Write one office's connection record. Only an owner or an admin may; the rules refuse the rest. */
+export async function saveSharedConnection(
+  connection: SharedConnection,
+  officeId = '',
+): Promise<void> {
+  const known = readCache()
+  writeCache({ ...known, connection })
+  // No office, no record: there is no business-wide document to write to any more.
+  if (!officeId) return
   const db = await firestoreDb()
   if (!db) return
   const { doc, setDoc, serverTimestamp } = await import('firebase/firestore')
   await setDoc(
-    doc(db, CONNECTION_COLLECTION, CONNECTION_DOC),
+    doc(db, CONNECTION_COLLECTION, officeId),
     {
       orgId: connection.orgId,
+      officeId,
       email: connection.email,
       rootFolderId: connection.rootFolderId,
       connectedAt: connection.connectedAt,
@@ -257,13 +306,38 @@ export async function saveSharedConnection(connection: SharedConnection): Promis
   )
 }
 
-/** Forget the connection record. Nothing inside the Google account itself is touched. */
-export async function forgetSharedConnection(): Promise<void> {
-  writeCache({ ...readCache(), connection: null })
+/**
+ * Disconnect one office: the Worker lets go of the account and this office's record is blanked.
+ *
+ * PHASE 63 — the document itself is KEPT, never deleted: its address and root folder are cleared,
+ * so the card reads Not connected and no history is destroyed. Nothing inside the Google account
+ * itself is touched.
+ *
+ * The business id and the office id are deliberately NOT written: a merge keeps the ones already
+ * there, and the rules refuse a write that changes orgId. Clearing the address is all it takes for
+ * loadSharedConnection to answer "no connection".
+ */
+export async function forgetSharedConnection(officeId = ''): Promise<void> {
+  const known = readCache()
+  writeCache({ ...known, connection: null })
+  if (!officeId) return
   const db = await firestoreDb()
   if (!db) return
-  const { doc, deleteDoc } = await import('firebase/firestore')
-  await deleteDoc(doc(db, CONNECTION_COLLECTION, CONNECTION_DOC))
+  try {
+    const { doc, setDoc, serverTimestamp } = await import('firebase/firestore')
+    await setDoc(
+      doc(db, CONNECTION_COLLECTION, officeId),
+      {
+        email: '',
+        rootFolderId: '',
+        connectedAt: '',
+        updatedAt: serverTimestamp(),
+      },
+      { merge: true },
+    )
+  } catch {
+    /* the Worker has already let go: this is only the record of it */
+  }
 }
 
 /**
@@ -489,7 +563,7 @@ export async function connectSharedDrive(orgId: string, officeId = ''): Promise<
         rootFolderId: status.rootFolderId,
         connectedAt: new Date().toISOString(),
       }
-      await saveSharedConnection(connection)
+      await saveSharedConnection(connection, officeId)
       return connection
     }
   }
@@ -504,22 +578,25 @@ export async function connectSharedDrive(orgId: string, officeId = ''): Promise<
   )
 }
 
-/** Disconnect: the Worker drops the shared key, and the app forgets the record. Files stay put. */
-export async function disconnectSharedDrive(): Promise<void> {
+/**
+ * Disconnect ONE office: the Worker lets go of the account, and this office's record is blanked so
+ * every open device reads Not connected at once. Files already in the Drive stay exactly where they
+ * are, and the record itself is kept — never deleted.
+ */
+export async function disconnectSharedDrive(officeId = ''): Promise<void> {
   const response = await callWorker('/subaccounts/disconnect', { method: 'POST' })
   if (!response.ok) throw await workerProblem(response, 'The key keeper did not let go of the connection.')
-  await forgetSharedConnection()
+  await forgetSharedConnection(officeId)
 }
 
-/* ------------------------------- connecting: one account, one folder set for each office (54) */
+/* ------------------------------- connecting: each office's own record and its folder set */
 
 /**
  * Press Connect, then make the folders of the office that pressed it.
  *
- * The connection itself is the one business-wide record, driveConnections/subAccounts, so every
- * office becomes Connected together — Lagos connecting shows PH as Connected too, and the reverse.
- * What belongs to this office alone is its folder set, saved in driveFolders/{officeId}; it never
- * makes a second one, because the Worker reuses any folder that is already there.
+ * PHASE 63: the connection record written is THIS office's own, driveConnections/{officeId}. No
+ * other office's record is read, written or compared, and an office that has never connected stays
+ * Not connected until somebody with Drive permission presses Connect for it.
  */
 export async function connectDriveForOffice(
   orgId: string,
@@ -605,14 +682,13 @@ export async function ensureSubFolders(office: {
 }
 
 /**
- * PHASE 56 — the office's own connection record keeps the root id beside its folders. Best effort on
+ * PHASE 63 — the office's own connection record keeps the root id beside its folders. Best effort on
  * purpose: the folder set just saved is what every upload reads, so a refusal here changes nothing.
- * The Google Drive card on "All offices" and "No office yet" still reads the one shared record, as
- * it always has.
+ * The record written is this office's own (driveConnections/{officeId}); no other office's is read.
  */
 async function saveOfficeConnection(doc: SubFolders): Promise<void> {
   try {
-    const connection = await loadSharedConnection(doc.orgId)
+    const connection = await loadSharedConnection(doc.officeId)
     const email = connection?.email ?? ''
     if (!email) return
     const db = await firestoreDb()
@@ -743,7 +819,7 @@ export type SharedReadiness =
  * Nothing here ever throws: a Drive that is not set up yet is a wait, not a fault, so no record is
  * ever lost and none is ever called Failed for it.
  */
-export async function sharedReadiness(officeId: string, orgId = ''): Promise<SharedReadiness> {
+export async function sharedReadiness(officeId: string): Promise<SharedReadiness> {
   if (!officeId) {
     return {
       ready: false,
@@ -753,11 +829,12 @@ export async function sharedReadiness(officeId: string, orgId = ''): Promise<Sha
   if (!driveWorkerUrl) {
     return { ready: false, reason: NOT_SET_UP }
   }
-  // PHASE 54: every office shares ONE Google account, so the connection that decides is the shared
-  // record — Lagos connecting makes PH ready too. What belongs to this office alone is its folders.
-  const connection = await loadSharedConnection(orgId)
+  // PHASE 63: the connection that decides is THIS office's own record, read live. There is no
+  // fallback to another office, to the owner's own settings/drive or to any default account: an
+  // office with no connection waits, and its files keep their place in its own queue.
+  const connection = await loadSharedConnection(officeId)
   if (!connection) {
-    return { ready: false, reason: "Waiting for the Google Drive connection" }
+    return { ready: false, reason: 'Waiting for the Google Drive connection' }
   }
   const folders = await loadSubFolders(officeId)
   if (!folders || !folders.root || SUB_FOLDER_KEYS.some((key) => !folders.folders[key])) {

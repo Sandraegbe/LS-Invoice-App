@@ -518,9 +518,9 @@ export function createOffice(input: OfficeInput, actor: { email?: string; orgId?
 async function makeFoldersFor(office: Office): Promise<void> {
   if (!office.id) return
   try {
-    // PHASE 54: every office shares ONE Google account, so that one connection decides. What is per
-    // office is its own folder set, saved under the office's ID.
-    const connection = await loadSharedConnection(office.orgId)
+    // PHASE 63: this office's OWN connection decides — never another office's and never a default.
+    // What is per office is its own connection record and its own folder set, both under its ID.
+    const connection = await loadSharedConnection(office.id)
     if (!connection) return
     // A set that is already there is left exactly as it is. That is what makes a rename, a second
     // save or a reconnect unable to leave a duplicate set behind: the folders are found by the

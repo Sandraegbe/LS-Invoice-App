@@ -20,6 +20,7 @@
  */
 
 import { dropPending, putPending, readPending } from '../lib/blobstore'
+import { firestoreDb } from '../lib/firebase'
 import { DriveError, MAX_FILE_BYTES, TOO_LARGE_MESSAGE, plainReason, uploadToDrive, type FolderKey } from './drive'
 import { SharedDriveError, SUB_FOLDER_KEYS, ensureSubFolders, findSharedFile, loadSubFolders, sharedReadiness } from './driveShared'
 import { findOffice, officeOfRecord, writingOffice } from './offices'
@@ -78,9 +79,25 @@ export interface SyncJob {
   missing?: boolean
 }
 
-const QUEUE_KEY = 'ls-invoice.sync-queue'
-const DONE_KEY = 'ls-invoice.sync-done'
-/** Old jobs are trimmed so the browser's small store never fills up. */
+/**
+ * PHASE 63, ITEM 2 — THE QUEUE IS NOT IN THE BROWSER ANY MORE.
+ *
+ * It used to be two localStorage keys (ls-invoice.sync-queue and ls-invoice.sync-done), which meant
+ * this phone's waiting list was its own and the PC showed a different count. It now lives in
+ * Firestore, one document per office, syncQueues/{officeId}, holding that office's jobs and the
+ * hashes of the files already in its Drive. Every device reads the same document through a live
+ * listener, so the waiting / syncing / failed list and its count are the same everywhere, within a
+ * second, with no refresh.
+ *
+ * What is NOT moved is the file's own bytes: a waiting attachment is still kept in the browser's
+ * own database (blobstore) because it is a file, not a record — the invoice screen says "Attach it
+ * again on the invoice" if that copy is missing.
+ *
+ * Nothing else about how syncing works has changed: the same keys, the same one-write rule, the
+ * same five tries, the same 120 kept.
+ */
+const QUEUE_COLLECTION = 'syncQueues'
+/** Old jobs are trimmed so one office's document never fills up. */
 const KEEP_SYNCED = 120
 /** After this many tries a job waits for a person rather than the clock. */
 const MAX_AUTO_TRIES = 5
@@ -100,16 +117,19 @@ function announce() {
   for (const listener of listeners) listener()
 }
 
+/* ------------------------------------------- what this page knows, filled from Firestore live */
+
+/** Each office's own jobs, exactly as its document in Firestore holds them. */
+let jobsByOffice = new Map<string, SyncJob[]>()
+/** Each office's own "this exact file is already in the Drive" hashes. */
+let doneByOffice = new Map<string, Record<string, string>>()
+
+function byCreatedAt(left: SyncJob, right: SyncJob): number {
+  return left.createdAt.localeCompare(right.createdAt)
+}
+
 function readQueue(): SyncJob[] {
-  try {
-    const raw = window.localStorage.getItem(QUEUE_KEY)
-    if (!raw) return []
-    const parsed = JSON.parse(raw)
-    if (!Array.isArray(parsed)) return []
-    return parsed.filter(isJob)
-  } catch {
-    return []
-  }
+  return [...jobsByOffice.values()].flat().sort(byCreatedAt)
 }
 
 function isJob(value: unknown): value is SyncJob {
@@ -118,40 +138,97 @@ function isJob(value: unknown): value is SyncJob {
   return typeof item.id === 'string' && typeof item.fileName === 'string' && typeof item.invoiceNo === 'string'
 }
 
-function writeQueue(jobs: SyncJob[]) {
+/** The document an office's jobs live in. A record with no office yet keeps its own place. */
+function queueDocId(officeId: string): string {
+  return officeId || 'unassigned'
+}
+
+function trim(jobs: SyncJob[]): SyncJob[] {
   const unsynced = jobs.filter((job) => job.status !== 'synced')
   const synced = jobs.filter((job) => job.status === 'synced').slice(-KEEP_SYNCED)
-  const kept = [...synced, ...unsynced].sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+  return [...synced, ...unsynced].sort(byCreatedAt)
+}
+
+/** Write one office's document. A refusal (a rule, an offline phone) never loses the page's copy. */
+async function saveOfficeQueue(officeId: string): Promise<void> {
+  const id = queueDocId(officeId)
+  const jobs = trim(jobsByOffice.get(id) ?? [])
+  const done = doneByOffice.get(id) ?? {}
+  const db = await firestoreDb()
+  if (!db) return
   try {
-    window.localStorage.setItem(QUEUE_KEY, JSON.stringify(kept))
+    const { doc, setDoc, serverTimestamp } = await import('firebase/firestore')
+    await setDoc(
+      doc(db, QUEUE_COLLECTION, id),
+      { officeId: id, jobs, done, updatedAt: serverTimestamp() },
+      { merge: true },
+    )
   } catch {
-    /* storage full: the jobs already synced are dropped first by the line above */
+    /* the worker's queue in this page still holds it, and the next change writes it again */
   }
+}
+
+function writeQueue(jobs: SyncJob[]) {
+  const offices = new Set<string>()
+  const next = new Map<string, SyncJob[]>()
+  for (const job of trim(jobs)) {
+    const officeId = queueDocId(officeIdOfJob(job))
+    offices.add(officeId)
+    next.set(officeId, [...(next.get(officeId) ?? []), job])
+  }
+  // An office that has just lost its last job still has to have that written.
+  for (const known of jobsByOffice.keys()) offices.add(known)
+  jobsByOffice = next
   announce()
+  for (const officeId of offices) void saveOfficeQueue(officeId)
 }
 
 /** The remembered hashes: "this exact file, under this exact name, is already in the Drive". */
 function readDone(): Record<string, string> {
-  try {
-    const raw = window.localStorage.getItem(DONE_KEY)
-    if (!raw) return {}
-    const parsed = JSON.parse(raw)
-    return parsed && typeof parsed === 'object' ? (parsed as Record<string, string>) : {}
-  } catch {
-    return {}
-  }
+  const all: Record<string, string> = {}
+  for (const done of doneByOffice.values()) Object.assign(all, done)
+  return all
 }
 
 function rememberDone(job: SyncJob, fileId: string) {
-  const done = readDone()
+  const officeId = queueDocId(officeIdOfJob(job))
+  const done = { ...(doneByOffice.get(officeId) ?? {}) }
   done[`${job.sha256}:${job.fileName}`] = fileId
+  // Keep the map to something one document will hold: the newest 500 hashes.
   const keys = Object.keys(done)
-  // Keep the map to something a browser will hold: the newest 500 hashes.
   for (const key of keys.slice(0, Math.max(0, keys.length - 500))) delete done[key]
-  try {
-    window.localStorage.setItem(DONE_KEY, JSON.stringify(done))
-  } catch {
-    /* ignore */
+  doneByOffice = new Map(doneByOffice).set(officeId, done)
+  void saveOfficeQueue(officeId)
+}
+
+/**
+ * PHASE 63: watch the queue of every office named, LIVE, and stop when the ids change.
+ *
+ * The app calls this once it is signed in — with the office the person is working in, or with every
+ * office for an owner and an admin — so the list on the Drive card and the count beside an invoice
+ * are the same on every open device.
+ */
+export async function watchQueues(officeIds: string[]): Promise<() => void> {
+  const wanted = [...new Set(officeIds.filter((id) => id !== undefined))].map(queueDocId)
+  if (wanted.length === 0) return () => undefined
+  const db = await firestoreDb()
+  if (!db) return () => undefined
+  const { doc, onSnapshot } = await import('firebase/firestore')
+  const stops = wanted.map((officeId) =>
+    onSnapshot(doc(db, QUEUE_COLLECTION, officeId), (snapshot) => {
+      const data = snapshot.exists() ? (snapshot.data() as Record<string, unknown>) : {}
+      const jobs = Array.isArray(data.jobs) ? (data.jobs as unknown[]).filter(isJob) : []
+      const done =
+        data.done && typeof data.done === 'object' ? (data.done as Record<string, string>) : {}
+      // A job whose file this page queued and has not written yet is not thrown away by an older
+      // answer from the server: whatever the document says is the truth for this office.
+      jobsByOffice = new Map(jobsByOffice).set(officeId, jobs)
+      doneByOffice = new Map(doneByOffice).set(officeId, done)
+      announce()
+    }),
+  )
+  return () => {
+    for (const stop of stops) stop()
   }
 }
 

@@ -2565,6 +2565,14 @@
     font-size: var(--text-micro);
     font-weight: 600;
     cursor: pointer;
+    /*
+     * PHASE 63, item 5 — the chip never wraps and never squeezes: "Not connected" stays on one line
+     * at every width. It keeps its own size beside a heading, and the heading is what gives way and
+     * wraps instead.
+     */
+    white-space: nowrap;
+    flex: 0 0 auto;
+    max-width: none;
   }
 
   .chip:hover:not(:disabled) {

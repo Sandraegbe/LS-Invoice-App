@@ -775,6 +775,75 @@ export async function signOut(): Promise<void> {
   }
 }
 
+/**
+ * PHASE 63, item 4 — THE PERSON'S OWN DOCUMENT, LIVE.
+ *
+ * users/{uid} is watched for as long as the app is open: a role, an office, a tick in "Sections this
+ * sub account can see", or the account being switched off, is seen on every open device within a
+ * second — nobody has to sign out and back in to get it.
+ *
+ *   same        nothing to do
+ *   changed     the profile was rewritten in this browser's own session record, so the menu and the
+ *               buttons can be redrawn from it
+ *   no-access   the account was switched off, or its document is gone: the app must sign out
+ *
+ * A refusal or a lost connection decides nothing: silence is never read as "access removed".
+ */
+export type ProfileChange =
+  | { kind: 'same' }
+  | { kind: 'changed'; user: SignedInUser }
+  | { kind: 'no-access'; reason: string }
+
+export async function watchOwnProfile(listener: (change: ProfileChange) => void): Promise<() => void> {
+  const auth = await firebaseAuth()
+  const uid = auth?.currentUser?.uid ?? ''
+  const db = await firestoreDb()
+  if (!db || !uid) return () => undefined
+  const { doc, onSnapshot } = await import('firebase/firestore')
+  return onSnapshot(
+    doc(db, 'users', uid),
+    (snapshot) => {
+      if (!snapshot.exists()) {
+        listener({ kind: 'no-access', reason: 'This account is no longer allowed into this workspace.' })
+        return
+      }
+      const data = snapshot.data() as Record<string, unknown>
+      if (data.disabled === true) {
+        listener({ kind: 'no-access', reason: 'An admin has switched this account off.' })
+        return
+      }
+      const role: Role = data.role === 'staff' ? 'staff' : 'admin'
+      const before = readStore()
+      const next: SignedInUser = {
+        email:
+          typeof data.email === 'string' && data.email
+            ? data.email.toLowerCase()
+            : before?.email ?? '',
+        name: cleanText(typeof data.name === 'string' ? data.name : '', 80) || before?.name || '',
+        role,
+        permissions: normalisePermissions(data.permissions, role),
+        orgId: typeof data.orgId === 'string' && data.orgId ? data.orgId : before?.orgId ?? '',
+      }
+      if (!next.email) return
+      const same =
+        before !== null &&
+        before.email === next.email &&
+        before.role === next.role &&
+        before.orgId === next.orgId &&
+        PERMISSION_KEYS.every((key) => before.permissions[key] === next.permissions[key])
+      if (same) {
+        listener({ kind: 'same' })
+        return
+      }
+      writeStore(next)
+      listener({ kind: 'changed', user: next })
+    },
+    () => {
+      /* offline, or the rules refused the read: nothing is decided from a silence */
+    },
+  )
+}
+
 /** Which of the six Firebase values are still empty — for the plain notice on the page. */
 export function firebaseStatus(): { configured: boolean; missing: string[] } {
   return { configured: firebaseConfigured(), missing: missingFirebaseKeys() }

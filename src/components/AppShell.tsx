@@ -11,14 +11,14 @@ import { ServicesPanel } from './ServicesPanel'
 import { OfficesPanel } from './OfficesPanel'
 import { SettingsPanel } from './SettingsPanel'
 import { OwnershipPanel } from './OwnershipPanel'
-import { needsEmailVerification, resendVerificationEmail, type SignedInUser } from '../data/auth'
+import { needsEmailVerification, resendVerificationEmail, watchOwnProfile, type SignedInUser } from '../data/auth'
 import { listInvoices } from '../data/invoices'
 import { listClients } from '../data/clients'
 import { pendingDecisionInvoices } from '../data/demurrage'
 import { DemurragePanel } from './DemurragePanel'
 import { WorkshopPanel } from './WorkshopPanel'
 import { ReportsPanel } from './ReportsPanel'
-import { resumeWaiting, startSync } from '../data/sync'
+import { resumeWaiting, startSync, watchQueues } from '../data/sync'
 import { writeAudit } from '../data/audit'
 import { IDLE_MINUTES, useIdleTimeout } from '../lib/idle'
 import {
@@ -230,6 +230,74 @@ export function AppShell({ tab, route, invoiceId, user, onNavigate, onSignOut, o
       live = false
     }
   }, [user.email, user.orgId])
+
+  /**
+   * PHASE 63, item 4 — THE PERSON'S OWN DOCUMENT, LIVE, AND THE SIGN-OUT THAT FOLLOWS ACCESS LOSS.
+   *
+   * users/{uid} is watched while the app is open. Two things can happen:
+   *   · the account is switched off, or its document is gone — the app signs out on the spot, so a
+   *     phone left open does not go on showing a workspace the person may no longer see;
+   *   · the role, the office or one of the ticks has changed — that is written into this browser's
+   *     own session record and the page redraws itself once, so the new menu and buttons appear
+   *     without anybody signing in again.
+   * Silence is never read as a removal: an offline phone keeps working.
+   */
+  useEffect(() => {
+    let stop: (() => void) | null = null
+    let live = true
+    let redrawn = false
+    void (async () => {
+      const off = await watchOwnProfile((change) => {
+        if (change.kind === 'no-access') {
+          writeAudit({
+            action: 'auth.signed-out',
+            actorEmail: user.email,
+            orgId: user.orgId,
+            target: user.email,
+            detail: `${user.email} was signed out: ${change.reason}`,
+          })
+          onIdle()
+          return
+        }
+        if (change.kind === 'changed' && !redrawn) {
+          redrawn = true
+          // The session record now holds the new role, office and ticks; one redraw shows them.
+          window.location.reload()
+        }
+      })
+      if (live) stop = off
+      else off()
+    })()
+    return () => {
+      live = false
+      if (stop) stop()
+    }
+  }, [user.email, user.orgId, onIdle])
+
+  /**
+   * PHASE 63, item 2 — THE SYNC QUEUE IS READ FROM FIRESTORE, LIVE.
+   *
+   * One watch per office, started once the app is open: what is waiting, sending or failed is the
+   * same list, with the same count, on the PC and on the phone. Nothing about it sits in this
+   * browser any more.
+   */
+  useEffect(() => {
+    let stop: (() => void) | null = null
+    let live = true
+    void (async () => {
+      await loadOffices(user.orgId)
+      const ids = listOffices(user.orgId)
+        .map((one) => one.id)
+        .filter((id) => id !== '')
+      const off = await watchQueues(ids)
+      if (live) stop = off
+      else off()
+    })()
+    return () => {
+      live = false
+      if (stop) stop()
+    }
+  }, [user.orgId])
 
   // Signed out after half an hour with nothing happening, and written to the log.
   useIdleTimeout(() => {
