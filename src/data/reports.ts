@@ -149,9 +149,14 @@ function methodOf(value: unknown): PaymentMethod {
 }
 
 /**
- * The invoice's service level. Express only when the document says so: `serviceLevel` is read
- * first, because every save from phase 50 on writes it beside `speed`, and `speed` is kept for the
- * invoices saved before that. Nothing said at all — or any other word — is Standard.
+ * The invoice's service level. Express only when the document says so, and nothing said at all —
+ * or any other word — is Standard.
+ *
+ * PHASE 58: `speed` is read FIRST, because that is the field the invoice list reads when it prints
+ * "Standard" or "Express" on a row (InvoiceList), so the report and the list can never disagree
+ * about what an invoice is. `serviceLevel` is the same choice under the name the record also asks
+ * for, written beside `speed` by every save, and kept as the fallback for a document that somehow
+ * has only that one.
  */
 function levelOf(value: unknown): ServiceLevel {
   return value === 'express' ? 'express' : 'standard'
@@ -252,7 +257,7 @@ function invoiceFrom(id: string, data: Record<string, unknown>): ReportInvoice {
     paidKobo: count(data.paidKobo),
     balanceKobo: count(data.balanceKobo),
     demurrageKobo: count(data.demurrageKobo),
-    level: levelOf(data.serviceLevel ?? data.speed),
+    level: levelOf(data.speed ?? data.serviceLevel),
     expressDays: count(data.expressDays),
     expressFeeKobo: count(data.expressAmountKobo),
     lines,
@@ -643,6 +648,138 @@ export function expressReport(data: ReportsData, filters: ReportFilters): Expres
   }
 }
 
+/* ------------------------------------------------------------------ the Service levels tab */
+
+/**
+ * PHASE 58, the person's Service levels tab.
+ *
+ * It reads the same invoices every other block reads, through invoicesMatching(), so the sub
+ * account, the date range, the staff member and the payment method all narrow it exactly as they
+ * narrow the rest of Reports. The level is the invoice's own `speed` — the field the invoice list
+ * prints — and an invoice that recorded no level counts as Standard (levelOf above).
+ *
+ * Every invoice is an order, paid or not. "Amount generated" is the invoice's own total, which
+ * already holds any Express fee and is already net of any discount, and "paid so far" is the
+ * invoice's own paid figure. The month is the month of the invoice's issued date, in the
+ * business's own clock.
+ */
+export interface LevelSide {
+  level: ServiceLevel
+  label: string
+  /** The invoices of this level: every one of them is an order, paid or not. */
+  orders: number
+  /** Their totals added up: items, plus any Express fee, minus any discount. */
+  kobo: number
+  /** What has been received on those invoices so far. */
+  paidKobo: number
+  /** Different clients behind those invoices. */
+  customers: number
+  expressFeeKobo: number
+  /** Mean Express days over the invoices that recorded days; null when none did. */
+  averageDays: number | null
+  /** This level's amount as a whole per cent of both levels' amounts; null when nothing was generated. */
+  sharePercent: number | null
+}
+
+/** One month of the tab: both levels side by side, then the month's own totals. */
+export interface LevelMonthRow {
+  /** YYYY-MM, or '' for the invoices that recorded no issued date. */
+  month: string
+  label: string
+  standard: LevelSide
+  express: LevelSide
+  orders: number
+  kobo: number
+  expressFeeKobo: number
+  averageExpressDays: number | null
+}
+
+export interface ServiceLevelsReport {
+  /** How many invoices the filters kept. Always shown, so a missing figure can be traced. */
+  read: number
+  standard: LevelSide
+  express: LevelSide
+  /** One line per month, newest first, with the undated invoices last. */
+  months: LevelMonthRow[]
+  /** The whole period, with each client counted once rather than once per month. */
+  total: LevelMonthRow
+}
+
+/** One level's figures over a set of invoices. */
+function levelSideOf(level: ServiceLevel, invoices: ReportInvoice[], generatedKobo: number): LevelSide {
+  const ofLevel = invoices.filter((invoice) => invoice.level === level)
+  const kobo = ofLevel.reduce((sum, invoice) => sum + invoice.totalKobo, 0)
+  const withDays = ofLevel.filter((invoice) => invoice.expressDays > 0)
+  const days = withDays.reduce((sum, invoice) => sum + invoice.expressDays, 0)
+  return {
+    level,
+    label: level === 'express' ? 'Express' : 'Standard',
+    orders: ofLevel.length,
+    kobo,
+    paidKobo: ofLevel.reduce((sum, invoice) => sum + invoice.paidKobo, 0),
+    customers: new Set(ofLevel.map((invoice) => invoice.clientId || invoice.clientName)).size,
+    expressFeeKobo: ofLevel.reduce((sum, invoice) => sum + invoice.expressFeeKobo, 0),
+    averageDays: withDays.length === 0 ? null : Math.round((days / withDays.length) * 10) / 10,
+    sharePercent: generatedKobo === 0 ? null : Math.round((kobo / generatedKobo) * 100),
+  }
+}
+
+export function serviceLevelsReport(data: ReportsData, filters: ReportFilters): ServiceLevelsReport {
+  const matched = invoicesMatching(data.invoices, filters)
+  const generatedKobo = matched.reduce((sum, invoice) => sum + invoice.totalKobo, 0)
+
+  const byMonth = new Map<string, ReportInvoice[]>()
+  for (const invoice of matched) {
+    const held = byMonth.get(invoice.month)
+    if (held) held.push(invoice)
+    else byMonth.set(invoice.month, [invoice])
+  }
+
+  const rowOf = (month: string, invoices: ReportInvoice[], label: string): LevelMonthRow => {
+    const standard = levelSideOf('standard', invoices, generatedKobo)
+    const express = levelSideOf('express', invoices, generatedKobo)
+    const withDays = invoices.filter((invoice) => invoice.level === 'express' && invoice.expressDays > 0)
+    const days = withDays.reduce((sum, invoice) => sum + invoice.expressDays, 0)
+    return {
+      month,
+      label,
+      standard,
+      express,
+      orders: invoices.length,
+      kobo: standard.kobo + express.kobo,
+      expressFeeKobo: express.expressFeeKobo,
+      averageExpressDays: withDays.length === 0 ? null : Math.round((days / withDays.length) * 10) / 10,
+    }
+  }
+
+  // Newest month first, and the invoices with no issued date last rather than lost.
+  const months = [...byMonth.keys()]
+    .sort((a, b) => {
+      if (!a) return 1
+      if (!b) return -1
+      return b.localeCompare(a)
+    })
+    .map((month) => rowOf(month, byMonth.get(month) ?? [], month ? monthLabel(month) : 'No issued date'))
+
+  return {
+    read: matched.length,
+    standard: levelSideOf('standard', matched, generatedKobo),
+    express: levelSideOf('express', matched, generatedKobo),
+    months,
+    total: rowOf('', matched, 'Total'),
+  }
+}
+
+/** A share of the whole, or a dash when nothing was generated at all. */
+function shareText(side: LevelSide): string {
+  return side.sharePercent === null ? '—' : `${side.sharePercent}%`
+}
+
+/** Mean days to one decimal, or a dash when no invoice recorded any. */
+function daysText(days: number | null): string {
+  return days === null ? '—' : `${days} days`
+}
+
 export interface ClientsReport {
   top: MoneyFigure[]
   newClients: number
@@ -744,7 +881,7 @@ export interface ReportSection {
   note?: string
 }
 
-export type Dashboard = 'executive' | 'financial' | 'clients'
+export type Dashboard = 'executive' | 'financial' | 'clients' | 'levels'
 
 export const DASHBOARDS: { id: Dashboard; label: string; blurb: string }[] = [
   {
@@ -761,6 +898,12 @@ export const DASHBOARDS: { id: Dashboard; label: string; blurb: string }[] = [
     id: 'clients',
     label: 'Client Performance',
     blurb: 'Who spends the most, who is new, who keeps coming back, and who still owes.',
+  },
+  {
+    id: 'levels',
+    label: 'Service levels',
+    blurb:
+      'Standard and Express side by side: how many orders each brought, how much each generated, what has been paid so far, and how the two moved month by month.',
   },
 ]
 
@@ -922,6 +1065,171 @@ export function sectionsFor(dashboard: Dashboard, data: ReportsData, filters: Re
                 kobo: row.kobo,
               })),
         note: `Customers who used both levels: ${express.bothLevels}. The three categories above are the ones that brought the most Express revenue, counted from the line amounts on Express invoices, one invoice counted once.`,
+      },
+    ]
+  }
+
+  /* PHASE 58: the Service levels tab — its own dashboard, built from the same invoices. */
+  if (dashboard === 'levels') {
+    const report = serviceLevelsReport(data, filters)
+    const nothing = report.read === 0
+
+    // The month table, newest first, with the whole period summed at the bottom.
+    const monthRows: ReportRow[] = report.months.map((row) => ({
+      cells: [
+        row.label,
+        String(row.standard.orders),
+        formatNaira(row.standard.kobo),
+        String(row.standard.customers),
+        String(row.express.orders),
+        formatNaira(row.express.kobo),
+        String(row.express.customers),
+        formatNaira(row.express.expressFeeKobo),
+        daysText(row.express.averageDays),
+        String(row.orders),
+        formatNaira(row.kobo),
+      ],
+      kobo: row.kobo,
+    }))
+    if (nothing) {
+      monthRows.push({ cells: ['No invoices in this period', '', '', '', '', '', '', '', '', '', ''] })
+    } else {
+      monthRows.push({
+        cells: [
+          'Total',
+          String(report.total.standard.orders),
+          formatNaira(report.total.standard.kobo),
+          String(report.total.standard.customers),
+          String(report.total.express.orders),
+          formatNaira(report.total.express.kobo),
+          String(report.total.express.customers),
+          formatNaira(report.total.express.expressFeeKobo),
+          daysText(report.total.express.averageDays),
+          String(report.total.orders),
+          formatNaira(report.total.kobo),
+        ],
+        kobo: report.total.kobo,
+      })
+    }
+
+    // The four charts read the months oldest first, because a line of months reads that way.
+    const oldestFirst = report.months.filter((row) => row.month !== '').slice().reverse()
+    // A month with no invoices at all says so; invoices that recorded no issued date cannot sit on a
+    // month, so they are named rather than silently missing from the four charts (the table keeps them).
+    const emptySeries = [
+      {
+        cells: [
+          nothing ? 'No invoices in this period' : 'No invoice in this period recorded an issued date',
+          '',
+        ],
+      },
+    ]
+    const series = (value: (row: LevelMonthRow) => number, text: (row: LevelMonthRow) => string): ReportRow[] =>
+      oldestFirst.length === 0
+        ? emptySeries
+        : oldestFirst.map((row) => ({ cells: [row.label, text(row)], kobo: value(row) }))
+
+    return [
+      {
+        id: 'service-read',
+        heading: 'Invoices read',
+        columns: ['Invoices read in this period', 'Invoices', 'Split'],
+        rows: nothing
+          ? [{ cells: ['No invoices in this period', '0', ''] }]
+          : [
+              {
+                cells: [
+                  'Invoices read in this period',
+                  String(report.read),
+                  `Standard ${report.standard.orders} · Express ${report.express.orders}`,
+                ],
+                kobo: report.read,
+              },
+            ],
+        note: 'Every invoice the filters kept is counted here, so any figure on this tab can be traced back to a number of invoices.',
+      },
+      {
+        id: 'service-cards',
+        heading: 'Standard and Express in this period',
+        columns: ['Figure', 'Value', 'Paid so far'],
+        rows: nothing
+          ? [{ cells: ['No invoices in this period', '—', ''] }]
+          : [
+              { cells: ['Standard orders', String(report.standard.orders), 'invoices, paid or not'] },
+              {
+                cells: [
+                  'Standard amount generated',
+                  formatNaira(report.standard.kobo),
+                  `Paid so far ${formatNaira(report.standard.paidKobo)}`,
+                ],
+                kobo: report.standard.kobo,
+              },
+              { cells: ['Express orders', String(report.express.orders), 'invoices, paid or not'] },
+              {
+                cells: [
+                  'Express amount generated',
+                  formatNaira(report.express.kobo),
+                  `Paid so far ${formatNaira(report.express.paidKobo)}`,
+                ],
+                kobo: report.express.kobo,
+              },
+              {
+                cells: ['Standard share of the total', shareText(report.standard), 'of the amount generated'],
+                kobo: report.standard.kobo,
+              },
+              {
+                cells: ['Express share of the total', shareText(report.express), 'of the amount generated'],
+                kobo: report.express.kobo,
+              },
+            ],
+        note: 'Amount generated is the invoice total: the items, plus any Express fee, minus any discount. Paid so far is what has been received on those invoices. A share is that level against the two levels together.',
+      },
+      {
+        id: 'service-months',
+        heading: 'Standard and Express, month by month',
+        columns: [
+          'Month',
+          'Standard orders',
+          'Standard amount',
+          'Standard customers',
+          'Express orders',
+          'Express amount',
+          'Express customers',
+          'Express fees',
+          'Average Express days',
+          'Total orders',
+          'Total amount',
+        ],
+        rows: monthRows,
+        note: 'An invoice with no service level counts as Standard. The month is the month of the invoice\u2019s issued date. Customers count different clients: on a month\u2019s line, the clients invoiced that month; on the Total line, each client once for the whole period. Average Express days covers only the Express invoices that recorded days.',
+      },
+      {
+        id: 'service-standard-orders',
+        heading: 'Standard orders per month',
+        columns: ['Month', 'Standard orders'],
+        rows: series((row) => row.standard.orders, (row) => String(row.standard.orders)),
+        note: 'Every invoice is an order, paid or not.',
+      },
+      {
+        id: 'service-express-orders',
+        heading: 'Express orders per month',
+        columns: ['Month', 'Express orders'],
+        rows: series((row) => row.express.orders, (row) => String(row.express.orders)),
+        note: 'Every invoice is an order, paid or not.',
+      },
+      {
+        id: 'service-standard-amount',
+        heading: 'Standard amount per month',
+        columns: ['Month', 'Standard amount'],
+        rows: series((row) => row.standard.kobo, (row) => formatNaira(row.standard.kobo)),
+        note: 'The invoices\u2019 own totals: items, plus any Express fee, minus any discount.',
+      },
+      {
+        id: 'service-express-amount',
+        heading: 'Express amount per month',
+        columns: ['Month', 'Express amount'],
+        rows: series((row) => row.express.kobo, (row) => formatNaira(row.express.kobo)),
+        note: 'The Express invoices\u2019 own totals, Express fee included.',
       },
     ]
   }

@@ -151,8 +151,6 @@ service cloud.firestore {
         && request.resource.data.role == 'staff'
         && request.resource.data.disabled == false
         && get(/databases/$(database)/documents/invites/$(myEmail())).data.status == 'pending'
-        && (get(/databases/$(database)/documents/invites/$(myEmail())).data.get('expiresAt', null) == null
-            || request.time < get(/databases/$(database)/documents/invites/$(myEmail())).data.get('expiresAt', null))
         && request.resource.data.get('officeId', '') == get(/databases/$(database)/documents/invites/$(myEmail())).data.get('officeId', '')
         && request.resource.data.permissions == get(/databases/$(database)/documents/invites/$(myEmail())).data.permissions
         && request.resource.data.orgId == get(/databases/$(database)/documents/invites/$(myEmail())).data.orgId
@@ -176,16 +174,14 @@ service cloud.firestore {
         && request.resource.data.orgId == resource.data.orgId
         && request.resource.data.email == resource.data.email
         && request.resource.data.role in ['admin', 'staff']
-        && (request.resource.data.role == resource.data.role
-            || (isAdminHere() && uid != get(/databases/$(database)/documents/ownership/main).data.ownerUid))
+        && (request.resource.data.role == resource.data.role || isOwner())
         && request.resource.data.get('officeId', '') is string
         && onlyPermissions(request.resource.data.permissions);
 
       allow delete: if managesStaff()
         && request.auth.uid != uid
         && resource.data.orgId == currentUser().orgId
-        && (resource.data.role != 'admin'
-            || (isAdminHere() && uid != get(/databases/$(database)/documents/ownership/main).data.ownerUid));
+        && (resource.data.role != 'admin' || isOwner());
 
       // Unfinished work, private to the person.
       match /drafts/{form} {
@@ -267,8 +263,7 @@ service cloud.firestore {
 
     // offices (sub accounts)
     match /offices/{officeId} {
-      allow read: if signedIn() && sameOrg(resource.data.orgId)
-        && (isAdminHere() || managesStaff() || (officeId == myOffice() && officeId != ''));
+      allow read: if signedIn() && sameOrg(resource.data.orgId);
 
       allow create: if managesStaff()
         && request.resource.data.orgId == currentUser().orgId
@@ -343,8 +338,7 @@ service cloud.firestore {
       allow read: if managesStaff() && sameOrg(resource.data.orgId)
         && sameOffice(resource.data.get('officeId', ''));
 
-      allow update: if false;
-      allow delete: if isAdminHere() && sameOrg(resource.data.orgId);
+      allow update, delete: if false;
     }
 
     // each admin's own Reports layout
@@ -369,7 +363,7 @@ service cloud.firestore {
 
     // the business's own letterhead
     match /settings/{document} {
-      allow read: if signedIn() && sameOrg(resource.data.orgId) && document != 'drive';
+      allow read: if signedIn() && sameOrg(resource.data.orgId);
       allow create, update: if signedIn()
         && !isDisabled()
         && isAdminHere()
@@ -390,7 +384,7 @@ service cloud.firestore {
 
     // the Google Drive connection (no token is ever stored here)
     match /settings/drive {
-      allow read: if isAdminHere() && sameOrg(resource.data.orgId);
+      allow read: if signedIn() && sameOrg(resource.data.orgId);
 
       allow create, update: if isAdmin()
         && !isDisabled()
@@ -481,7 +475,8 @@ service cloud.firestore {
         && request.resource.data.createdBy is string
         && request.resource.data.payments is list
         && (may('managePayments') || request.resource.data.payments.size() == 0)
-        && request.resource.data.get('ownerSignature', null) == null;
+        && request.resource.data.get('ownerSignature', null) == null
+        && request.resource.data.get('paidStamp', null) == null;
 
       // The raiser or an admin corrects an unsent invoice. The signature is never touched here.
       allow update: if signedIn()
@@ -496,16 +491,16 @@ service cloud.firestore {
         && request.resource.data.createdBy == resource.data.createdBy
         && request.resource.data.lines is list
         && request.resource.data.lines.size() > 0
-        && request.resource.data.get('ownerSignature', null) == resource.data.get('ownerSignature', null);
+        && request.resource.data.get('ownerSignature', null) == resource.data.get('ownerSignature', null)
+        && request.resource.data.get('paidStamp', null) == resource.data.get('paidStamp', null);
 
-      // The owner or an admin signs, signs again, or deletes the signature while no payment is recorded.
+      // The owner or an admin signs, signs again, or deletes the signature at any time.
       allow update: if signedIn()
         && !isDisabled()
         && isAdminHere()
         && resource.data.orgId == currentUser().orgId
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['ownerSignature', 'updatedAt'])
-        && ((request.resource.data.get('ownerSignature', null) == null
-             && resource.data.get('payments', []).size() == 0)
+        && (request.resource.data.get('ownerSignature', null) == null
             || (request.resource.data.get('ownerSignature', null) != null
                 && request.resource.data.ownerSignature is map
                 && request.resource.data.ownerSignature.keys().hasOnly(['dataUrl', 'name', 'email', 'signedAt'])
@@ -513,13 +508,26 @@ service cloud.firestore {
                 && request.resource.data.ownerSignature.dataUrl.size() <= 300000
                 && request.resource.data.ownerSignature.email == myEmail()));
 
-      // Whoever manages payments records a payment, but only on a signed invoice. Only the money moves.
+      // The owner or an admin turns the PAID stamp on (client has paid) or off. No amount is involved.
+      // On or off at any time, with or without a signature.
+      allow update: if signedIn()
+        && !isDisabled()
+        && isAdminHere()
+        && resource.data.orgId == currentUser().orgId
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['paidStamp', 'updatedAt'])
+        && (request.resource.data.get('paidStamp', null) == null
+            || (request.resource.data.get('paidStamp', null) != null
+                && request.resource.data.paidStamp is map
+                && request.resource.data.paidStamp.keys().hasOnly(['by', 'email', 'at'])
+                && request.resource.data.paidStamp.email == myEmail()));
+
+      // Whoever manages payments records the amount, even before the owner has signed or stamped.
+      // Only the money moves.
       allow update: if signedIn()
         && !isDisabled()
         && resource.data.orgId == currentUser().orgId
         && sameOffice(resource.data.get('officeId', ''))
         && may('managePayments')
-        && resource.data.get('ownerSignature', null) != null
         && request.resource.data.number == resource.data.number
         && request.resource.data.lines == resource.data.lines
         && request.resource.data.get('officeId', '') == resource.data.get('officeId', '')
@@ -529,19 +537,19 @@ service cloud.firestore {
         && request.resource.data.get('clientName', '') == resource.data.get('clientName', '')
         && request.resource.data.totalKobo == resource.data.totalKobo
         && request.resource.data.get('ownerSignature', null) == resource.data.get('ownerSignature', null)
+        && request.resource.data.get('paidStamp', null) == resource.data.get('paidStamp', null)
         && request.resource.data.payments is list
         && request.resource.data.payments.size() >= resource.data.payments.size()
         && request.resource.data.status in ['unpaid', 'part-paid', 'paid']
         && request.resource.data.paidKobo is int
         && request.resource.data.balanceKobo is int;
 
-      // A paid and signed invoice may be marked sent (and only that kind).
+      // A signed invoice with a payment (part or full) may be marked sent, and again after a later payment.
       allow update: if signedIn()
         && !isDisabled()
         && resource.data.orgId == currentUser().orgId
         && sameOffice(resource.data.get('officeId', ''))
-        && resource.data.get('sentAt', null) == null
-        && resource.data.status == 'paid'
+        && resource.data.status in ['part-paid', 'paid']
         && resource.data.get('ownerSignature', null) != null
         && request.resource.data.sentAt is string
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['sentAt', 'updatedAt']);
@@ -552,7 +560,7 @@ service cloud.firestore {
         && resource.data.orgId == currentUser().orgId
         && sameOffice(resource.data.get('officeId', ''))
         && !request.resource.data.diff(resource.data).affectedKeys()
-             .hasAny(['snapshot', 'office', 'sentAt', 'createdAt', 'ownerSignature'])
+             .hasAny(['snapshot', 'office', 'sentAt', 'createdAt', 'ownerSignature', 'paidStamp'])
         && request.resource.data.number == resource.data.number
         && request.resource.data.get('officeId', '') == resource.data.get('officeId', '')
         && request.resource.data.orgId == resource.data.orgId
@@ -649,7 +657,7 @@ service cloud.firestore {
         && request.resource.data.item is map
         && request.resource.data.item.keys().hasOnly(
              ['itemName', 'invoiceNo', 'dateOfTransaction', 'workToBeDone', 'service',
-              'serviceCategory', 'quantity'])
+              'serviceCategory', 'quantity', 'serviceLevel', 'pickupDate'])
         && request.resource.data.keys().hasOnly([
              'id', 'shipmentId', 'orgId', 'invoiceId', 'lineId', 'invoiceNo', 'lineNo',
              'originOfficeId', 'originOfficeName', 'destinationOfficeId', 'destinationOfficeName',
@@ -797,25 +805,6 @@ service cloud.firestore {
         && request.resource.data.keys().hasOnly(['name', 'active', 'orgId', 'updatedAt']);
 
       allow delete: if false;
-    }
-
-    // people who signed in but have no invite yet ask the admin for access
-    match /accessRequests/{requestId} {
-      allow read: if signedIn() && (requestId == myEmail() || managesStaff());
-      allow create: if signedIn()
-        && requestId == myEmail()
-        && request.resource.data.email == requestId
-        && request.resource.data.uid == request.auth.uid
-        && request.resource.data.status == 'waiting'
-        && request.resource.data.keys().hasOnly(['email', 'uid', 'name', 'status', 'requestedAt']);
-      allow update: if signedIn()
-        && requestId == myEmail()
-        && resource.data.status == 'waiting'
-        && request.resource.data.email == requestId
-        && request.resource.data.uid == request.auth.uid
-        && request.resource.data.status == 'waiting'
-        && request.resource.data.keys().hasOnly(['email', 'uid', 'name', 'status', 'requestedAt']);
-      allow delete: if managesStaff();
     }
 
     // everything else is closed

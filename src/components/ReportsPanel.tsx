@@ -191,13 +191,17 @@ function ReportsBody({ user }: { user: SignedInUser }) {
 
   /** Every block of every dashboard, counted once for this read and these filters. */
   const allSections = useMemo(() => {
-    const lists: Record<Dashboard, ReportSection[]> = { executive: [], financial: [], clients: [] }
+    const lists: Record<Dashboard, ReportSection[]> = { executive: [], financial: [], clients: [], levels: [] }
     if (!data) return lists
     for (const id of DASH_ORDER) lists[id] = sectionsFor(id, data, filters)
     return lists
   }, [data, filters])
 
   const widgets: DashboardLayout = layout[dashboard]
+
+  // PHASE 58: how many invoices the Service levels tab read, kept on screen so any figure on it can
+  // be traced back to a number of invoices. It is the same count the tab's own first block shows.
+  const levelsRead = allSections.levels.find((section) => section.id === 'service-read')?.rows[0]?.cells[1] ?? '0'
 
   const sectionOf = (widget: ReportWidget): ReportSection | undefined =>
     allSections[widget.dashboard].find((section) => section.id === widget.section)
@@ -438,6 +442,13 @@ function ReportsBody({ user }: { user: SignedInUser }) {
           ))}
         </div>
         <p className="mt-2 text-[12.5px] leading-5 text-muted">{labelBlurb(dashboard)}</p>
+        {dashboard === 'levels' && data ? (
+          <p className="mt-1 text-[12px] font-medium text-ink">
+            {levelsRead === '0'
+              ? 'No invoices in this period'
+              : `Read from ${levelsRead} ${levelsRead === '1' ? 'invoice' : 'invoices'} in this period`}
+          </p>
+        ) : null}
         <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
           <div className="flex flex-wrap gap-2">
             {VIEWS.map((choice) => (
@@ -670,6 +681,7 @@ function availableFrom(data: ReportsData): Available {
     executive: sectionsFor('executive', data, NO_FILTERS).map((section) => section.id),
     financial: sectionsFor('financial', data, NO_FILTERS).map((section) => section.id),
     clients: sectionsFor('clients', data, NO_FILTERS).map((section) => section.id),
+    levels: sectionsFor('levels', data, NO_FILTERS).map((section) => section.id),
   }
 }
 

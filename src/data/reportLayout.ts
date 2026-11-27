@@ -34,16 +34,32 @@ export interface ReportWidget {
 export type DashboardLayout = ReportWidget[]
 export type ReportLayout = Record<Dashboard, DashboardLayout>
 
-/** The block ids each dashboard offers, in the order data/reports.ts builds them. */
+/**
+ * The block ids each dashboard offers, in the order data/reports.ts builds them. PHASE 58 adds the
+ * Service levels dashboard beside the first three.
+ */
 export type Available = Record<Dashboard, string[]>
 
 /** Nothing known yet: used before Firestore has answered, and by the default arrangement. */
-export const EMPTY_AVAILABLE: Available = { executive: [], financial: [], clients: [] }
+export const EMPTY_AVAILABLE: Available = { executive: [], financial: [], clients: [], levels: [] }
 
 export const LAYOUT_COLLECTION = 'reportLayouts'
 
-/** The three dashboards, in the order the screen shows them. */
-export const DASH_ORDER: Dashboard[] = ['executive', 'financial', 'clients']
+/** The four dashboards, in the order the screen shows them. */
+export const DASH_ORDER: Dashboard[] = ['executive', 'financial', 'clients', 'levels']
+
+/**
+ * How the Service levels tab's own blocks are drawn when they are first placed: its top figures as
+ * cards, its four month series as bars and its month table as a table. Every other block on every
+ * other dashboard keeps the table it has always been drawn as.
+ */
+const DRAWN_AS: Record<string, ReportView> = {
+  'service-cards': 'cards',
+  'service-standard-orders': 'charts',
+  'service-express-orders': 'charts',
+  'service-standard-amount': 'charts',
+  'service-express-amount': 'charts',
+}
 
 /** However keen an admin is, one dashboard holds no more than this many widgets. */
 const MOST_WIDGETS = 24
@@ -55,15 +71,16 @@ export function widgetKey(widget: ReportWidget): string {
 
 /**
  * The default arrangement: every block of the dashboard, in the builder's own order, full width and
- * drawn as a table — exactly the page Phase 9 showed.
+ * drawn as a table — exactly the page Phase 9 showed — except the Service levels blocks, which are
+ * drawn the way that tab describes them (cards for its top figures, bars for its four month series).
  */
 export function defaultLayout(available: Available): ReportLayout {
-  const layout: ReportLayout = { executive: [], financial: [], clients: [] }
+  const layout: ReportLayout = { executive: [], financial: [], clients: [], levels: [] }
   for (const dashboard of DASH_ORDER) {
     layout[dashboard] = (available[dashboard] ?? []).map((section) => ({
       dashboard,
       section,
-      view: 'table' as ReportView,
+      view: DRAWN_AS[section] ?? ('table' as ReportView),
       size: 'full' as WidgetSize,
     }))
   }
@@ -77,7 +94,9 @@ export function defaultLayout(available: Available): ReportLayout {
  * this screen does not have, a size that is neither half nor full, or the same widget twice on one
  * dashboard. An emptied dashboard is honoured as empty — removing every widget and saving it is a
  * choice, not a mistake — but a document that says nothing about the dashboards at all falls back
- * to the default.
+ * to the default. PHASE 58 adds one more case: a dashboard the saved arrangement says nothing about
+ * at all (one added after that arrangement was saved, such as Service levels) also takes the
+ * default, so a new tab is never empty just because nobody has arranged it yet.
  */
 export function sanitiseLayout(raw: unknown, available: Available, fallback: ReportLayout): ReportLayout {
   if (!raw || typeof raw !== 'object') return fallback
@@ -85,9 +104,13 @@ export function sanitiseLayout(raw: unknown, available: Available, fallback: Rep
   const said = DASH_ORDER.some((dashboard) => Array.isArray(source[dashboard]))
   if (!said) return fallback
 
-  const layout: ReportLayout = { executive: [], financial: [], clients: [] }
+  const layout: ReportLayout = { executive: [], financial: [], clients: [], levels: [] }
   for (const dashboard of DASH_ORDER) {
-    const rows = Array.isArray(source[dashboard]) ? (source[dashboard] as unknown[]) : []
+    if (!Array.isArray(source[dashboard])) {
+      layout[dashboard] = fallback[dashboard] ?? []
+      continue
+    }
+    const rows = source[dashboard] as unknown[]
     const seen = new Set<string>()
     const widgets: DashboardLayout = []
     for (const row of rows) {
