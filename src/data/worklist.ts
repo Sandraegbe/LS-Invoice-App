@@ -63,11 +63,21 @@ export interface WorkRow {
   line: InvoiceLine
 }
 
-/** One row per paid line, and only for the invoices that qualify. */
+/**
+ * One row per paid line, and only for the invoices that qualify.
+ *
+ * PHASE 60, ITEM 4: a line that another sub account worked on and sent back is booked into Pickup
+ * when the origin presses Received (see bookShipmentWork in ./invoices), and from that moment it
+ * belongs to Pickup and never comes back here — `workedOnOffice` is the mark that says so.
+ */
 export function assignedRows(invoices: Invoice[]): WorkRow[] {
   return invoices
     .filter(qualifies)
-    .flatMap((invoice) => paidLines(invoice).map((line) => ({ invoice, line })))
+    .flatMap((invoice) =>
+      paidLines(invoice)
+        .filter((line) => !(line.workedOnOffice ?? '').trim())
+        .map((line) => ({ invoice, line })),
+    )
     .sort((left, right) => {
       const byClient = left.invoice.clientName.localeCompare(right.invoice.clientName)
       if (byClient !== 0) return byClient
@@ -219,6 +229,73 @@ export function addSavedName(orgId: string, name: string): string[] {
     }
   })()
   return next
+}
+
+/* --------------------------------------- PHASE 60, ITEM 5: saving a name for a named office */
+
+/**
+ * PHASE 60, ITEM 5 — SAVING A NAME INTO AN OFFICE THAT IS NOT THE ONE ON SCREEN.
+ *
+ * A shipment is assigned at the destination and received at the origin, so both of those presses
+ * have to write into an office whose list the person is not looking at. namesKey above can only
+ * answer for the office on screen; these two answer for any office, and use exactly the same key
+ * shape, so a list written here is the list that office sees.
+ */
+
+/** The key one office's list is cached under — the same shape namesKey above builds. */
+function officeNamesKey(orgId: string, officeId: string): string {
+  return `${NAMES_PREFIX}${orgId || 'local'}.${officeId || 'all'}`
+}
+
+/** One named office's own list of saved names, in the order they were added. */
+export function savedNamesOf(orgId: string, officeId: string): string[] {
+  try {
+    const raw = window.localStorage.getItem(officeNamesKey(orgId, officeId))
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return parsed.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+  } catch {
+    return []
+  }
+}
+
+/**
+ * Remember one name in ONE office's list.
+ *
+ * A name the office already has is skipped: nothing is written, and a saved name is never updated
+ * — the database itself only lets a new one be created. A name that cannot be written (offline, or
+ * the database refusing) still stays on this device and is reported as 'skipped'. It never throws,
+ * so a name can never hold up the press that asked for it.
+ */
+export async function rememberStaffName(
+  orgId: string,
+  officeId: string,
+  rawName: string,
+): Promise<'saved' | 'known' | 'skipped'> {
+  const name = rawName.trim().replace(/\s+/g, ' ').slice(0, 120)
+  if (!name) return 'skipped'
+  const list = savedNamesOf(orgId, officeId)
+  if (list.some((item) => item.toLowerCase() === name.toLowerCase())) return 'known'
+  try {
+    window.localStorage.setItem(officeNamesKey(orgId, officeId), JSON.stringify([...list, name]))
+  } catch {
+    /* storage blocked: the database write below still carries the name */
+  }
+  const db = await firestoreDb()
+  if (!db) return 'saved'
+  try {
+    const { doc, getDoc, setDoc } = await import('firebase/firestore')
+    const ref = doc(db, STAFF_NAMES_COLLECTION, nameId(orgId, officeId, name))
+    // Read it first: a name that is already there is left exactly as it is, never written over.
+    const found = await getDoc(ref)
+    if (found.exists()) return 'known'
+    await setDoc(ref, { name, orgId: orgId || 'local', officeId, at: Date.now() })
+    return 'saved'
+  } catch {
+    /* offline, or the database refused: the device keeps it and nothing blocks the press */
+    return 'skipped'
+  }
 }
 
 /** Take a name off the sub account's list (an admin's job). */

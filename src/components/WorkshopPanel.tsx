@@ -23,6 +23,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { SignPad, clearSignStrokes, type SignActions } from './SignPad'
 import {
+  bookShipmentWork,
   listInvoices,
   savePickupCollection,
   setLineAssignees,
@@ -40,7 +41,9 @@ import {
   listShipments,
   officeNameOf,
   otherOffices,
+  pickupDayWord,
   receiveShipment,
+  serviceLevelWord,
   setShipmentAssignees,
   setWorkFinished,
   shipBack,
@@ -70,6 +73,7 @@ import {
   readPlace,
   readSign,
   loadSavedNames,
+  rememberStaffName,
   removeSavedName,
   savedNames,
   waitingLines,
@@ -97,6 +101,29 @@ interface Props {
 
 const SMALL = 'text-[12px] leading-5 text-muted'
 const PANEL = 'rounded-md border border-line bg-white p-3 space-y-2'
+
+/**
+ * PHASE 60, ITEM 1 — THE ONE SENTENCE A SHIPPED LINE SAYS AT ITS OWN OFFICE.
+ *
+ * "Shipped to [office] on [date], [Standard or Express], estimated pick-up [date or Not set]."
+ * The two facts come off the shipment's own item map (items 2 and 3); a shipment written before
+ * this phase has neither, so the invoice the line belongs to is asked instead, and a line with no
+ * pick-up date says "Not set" rather than nothing at all.
+ */
+function shippedSentence(invoice: Invoice, ship: ShipmentRecord): string {
+  const office = ship.destinationOfficeName || 'the other sub account'
+  const day = ship.shippedAt ? dayOf(ship.shippedAt) : ''
+  const level = ship.item?.serviceLevel ? serviceLevelWord(ship.item) : speedLabel(invoice.speed)
+  const pickup = pickupDayWord(ship.item) || invoice.pickupDate || ''
+  return `Shipped to ${office} on ${day || 'a day not recorded'}, ${level}, estimated pick-up ${dayWordOf(pickup) || 'Not set'}.`
+}
+
+/** A store's own YYYY-MM-DD said the way a person reads it, or '' when there is nothing to say. */
+function dayWordOf(value: string | undefined): string {
+  const word = (value ?? '').trim()
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(word)) return ''
+  return dayOf(`${word}T12:00:00`)
+}
 
 /* --------------------------------------------------------------------------------- the signature pad */
 
@@ -607,32 +634,36 @@ function AssignedSection({
                       )}
                     </div>
 
-                    {/* The Work approved switch: until it is on, this line cannot be collected. */}
-                    <div className="flex flex-wrap items-center gap-2">
-                      <label className={ship ? 'tag gap-1' : 'tag gap-1 cursor-pointer'}>
-                        <input
-                          type="checkbox"
-                          checked={row.line.workApproved === true}
-                          disabled={Boolean(ship)}
-                          aria-label={`Work approved for ${lineNameOf(row.line)} on ${invoice.number}`}
-                          onChange={() => toggleApproved(row)}
-                        />
-                        <span>Work approved</span>
-                      </label>
-                      <span className={SMALL}>
-                        {ship
-                          ? `cannot be turned on while it is with ${ship.destinationOfficeName} — receive it back first`
-                          : row.line.workApproved === true
+                    {/* PHASE 60, ITEM 1: once the item has been shipped, this line stops offering the
+                        Work approved switch at all — the only thing it says is the one sentence, and
+                        it is not tickable from here while another sub account has the item. */}
+                    {ship ? (
+                      <p className={SMALL}>{shippedSentence(invoice, ship)}</p>
+                    ) : (
+                      <div className="flex flex-wrap items-center gap-2">
+                        <label className="tag gap-1 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={row.line.workApproved === true}
+                            aria-label={`Work approved for ${lineNameOf(row.line)} on ${invoice.number}`}
+                            onChange={() => toggleApproved(row)}
+                          />
+                          <span>Work approved</span>
+                        </label>
+                        <span className={SMALL}>
+                          {row.line.workApproved === true
                             ? `on — ${row.line.workApprovedBy || 'staff'}${
                                 row.line.workApprovedAt ? `, ${dayOf(row.line.workApprovedAt)}` : ''
                               }`
                             : 'off — this line cannot be collected yet'}
-                      </span>
-                    </div>
+                        </span>
+                      </div>
+                    )}
 
+                    {/* PHASE 60, ITEM 1: while the item is away its staff names are not shown here at
+                        all, and the two pickers go with them — the other office owns who is on it. */}
                     <div className="flex flex-wrap items-center gap-2">
-                      {ship ? <span className={SMALL}>Assigned to {ship.destinationOfficeName}</span> : null}
-                      {!ship && people.length === 0 ? <span className={SMALL}>Nobody yet</span> : null}
+                      {ship ? null : people.length === 0 ? <span className={SMALL}>Nobody yet</span> : null}
                       {(ship ? [] : people).map((person) => (
                         <span key={(person.email || person.name).toLowerCase()} className="tag gap-1">
                           {person.name}
@@ -653,7 +684,7 @@ function AssignedSection({
                       <select
                         className="admin-input h-[32px]"
                         value=""
-                        aria-label={`Add someone from this office to ${lineNameOf(row.line)}`}
+                        aria-label={`Cobblers and Technicians working on ${lineNameOf(row.line)}`}
                         onChange={(event) => {
                           const email = event.target.value
                           if (!email) return
@@ -663,7 +694,7 @@ function AssignedSection({
                           }
                         }}
                       >
-                        <option value="">Add someone from this office…</option>
+                        <option value="">Cobblers and Technicians working on this item</option>
                         {roster
                           .filter(
                             (person) =>
@@ -738,10 +769,7 @@ function AssignedSection({
       />
 
       <div className={PANEL}>
-        <h3 className="text-[14px] font-semibold">Names this office can reuse</h3>
-        <p className={SMALL}>
-          A typed name is kept here for this office, on this device.
-        </p>
+        <h3 className="text-[14px] font-semibold">Saved Cobblers and Technicians</h3>
         {names.length === 0 ? <p className={SMALL}>No name has been typed in yet.</p> : null}
         <ul className="flex flex-wrap gap-2">
           {names.map((name) => (
@@ -825,6 +853,12 @@ function ShippedInSection({
   async function assign(shipment: ShipmentRecord, people: { email?: string; name: string }[], said: string) {
     await press(shipment, async () => {
       await setShipmentAssignees(shipment.id, people)
+      // PHASE 60, ITEM 5: every name now on the item is saved in THIS office's own list, so the
+      // office can reuse it later. A name the list already has is skipped and a name that cannot be
+      // written never throws, so neither can hold up the assignment itself.
+      await Promise.all(
+        people.map((person) => rememberStaffName(orgId, shipment.destinationOfficeId, person.name)),
+      )
       await writeShippingRecord({
         shipment,
         event: `Staff assigned: ${people.length ? people.map((person) => person.name).join(', ') : 'nobody'}`,
@@ -853,7 +887,7 @@ function ShippedInSection({
       })
       await writeShippingRecord({
         shipment: saved,
-        event: on ? 'Work finished' : 'Work finished withdrawn',
+        event: on ? 'Work approved' : 'Work approval taken off',
         by: viewer.name || viewer.email,
         fromOffice: saved.originOfficeName,
         toOffice: saved.destinationOfficeName,
@@ -864,9 +898,9 @@ function ShippedInSection({
         orgId,
         officeId: saved.destinationOfficeId,
         target: `${saved.invoiceNo} · ${saved.item.itemName}`,
-        detail: on ? 'Work finished' : 'Work finished taken off again',
+        detail: on ? 'Work approved' : 'Work approval taken off again',
       })
-      say(on ? `Work on ${saved.item.itemName} is finished.` : `Work on ${saved.item.itemName} is open again.`)
+      say(on ? `Work on ${saved.item.itemName} is approved.` : `Work on ${saved.item.itemName} is open again.`)
     })
   }
 
@@ -898,9 +932,8 @@ function ShippedInSection({
     <div className={PANEL}>
       <h3 className="text-[14px] font-semibold">Shipped in items</h3>
       <p className={SMALL}>
-        Items another sub account has sent here to be worked on. Only what is needed to do the work is shown: the
-        item, the invoice number, the date, the work, the service and the quantity. Whoever is sent an item assigns
-        its staff here, turns Work finished on when it is done, and sends it back.
+        Sent here by another sub account. Its staff work on it, Work approved is turned on when the
+        work is done, and then it goes back.
       </p>
 
       {error ? <p className="form-error">{error}</p> : null}
@@ -922,6 +955,14 @@ function ShippedInSection({
                 <span className={SMALL}>qty {shipment.item.quantity || 0}</span>
                 <span className={SMALL}>
                   {shipment.item.dateOfTransaction ? `dated ${dayOf(shipment.item.dateOfTransaction)}` : 'no date'}
+                </span>
+                {/* PHASE 60, ITEMS 2 AND 3: the service level and the estimated pick-up date now
+                    travel with the item, so this office can read them off the card too. */}
+                <span className="tag">{serviceLevelWord(shipment.item)}</span>
+                <span className={SMALL}>
+                  {pickupDayWord(shipment.item)
+                    ? `estimated pick-up ${dayOf(`${pickupDayWord(shipment.item)}T12:00:00`)}`
+                    : 'estimated pick-up not set'}
                 </span>
               </div>
               <p className={SMALL}>
@@ -962,7 +1003,7 @@ function ShippedInSection({
                 <select
                   className="admin-input h-[32px]"
                   value=""
-                  aria-label={`Add someone from this office to ${shipment.item.itemName}`}
+                  aria-label={`Cobblers and Technicians working on ${shipment.item.itemName}`}
                   onChange={(event) => {
                     const email = event.target.value
                     if (!email) return
@@ -976,7 +1017,7 @@ function ShippedInSection({
                     }
                   }}
                 >
-                  <option value="">Add someone from this office…</option>
+                  <option value="">Cobblers and Technicians working on this item</option>
                   {roster
                     .filter(
                       (person) =>
@@ -1021,17 +1062,17 @@ function ShippedInSection({
                     type="checkbox"
                     checked={shipment.status === 'work-finished'}
                     disabled={busy === shipment.id}
-                    aria-label={`Work finished on ${shipment.item.itemName}`}
+                    aria-label={`Work approved on ${shipment.item.itemName}`}
                     onChange={() => void pressFinished(shipment, shipment.status !== 'work-finished')}
                   />
-                  <span>Work finished</span>
+                  <span>Work approved</span>
                 </label>
                 <span className={SMALL}>
                   {shipment.status === 'work-finished'
                     ? `on — ${shipment.workFinishedBy || 'staff'}${
                         shipment.workFinishedAt ? `, ${dayOf(shipment.workFinishedAt)}` : ''
                       }`
-                    : 'off — send it back only when the work is finished'}
+                    : 'off'}
                 </span>
                 {shipment.status === 'work-finished' ? (
                   <button
@@ -1263,11 +1304,12 @@ function PickupSection({
   )
 
   /* PHASE 55, item 4: an item that is away at another sub account is not here. Its line cannot be
-     collected until the destination sends it back and somebody presses Received. */
+     collected until the destination sends it back and somebody presses Received.
+     PHASE 60, ITEM 7: the test is now the shipment itself, not the office this screen thinks it is
+     at — a line with a live shipment that has not been received is never one of the cards, at
+     either end, so until Received the item appears only in "In transit back" above. */
   const away = new Set(
-    returns
-      .filter((shipment) => shipment.originOfficeId === myOffice && shipment.status !== 'received')
-      .map((shipment) => shipment.lineId),
+    returns.filter((shipment) => shipment.status !== 'received').map((shipment) => shipment.lineId),
   )
   const atHome = (line: InvoiceLine) => !away.has(line.id)
 
@@ -1281,8 +1323,14 @@ function PickupSection({
 
   /**
    * PRESS 6 — "Received". The item is back in its own office: the shipment says who and when, and
-   * the line stops pointing at it, so the line is at home again and may be approved for collection
-   * (Walk approved is never carried over: it can only be switched on after this press).
+   * the line stops pointing at it.
+   *
+   * PHASE 60, ITEM 4: the press now does the whole job in one go. Until this phase the line came
+   * back looking untouched — Work approved off, nobody on it, no pick-up — so an item that had been
+   * worked on at another sub account fell back into Assigned with "off — this line cannot be
+   * collected yet". bookShipmentWork writes what the destination actually did: Work approved on,
+   * approved at that sub account, the shipment's own names on the line, the pick-up ready, and the
+   * item at home. The line then appears here in Pickup, never in Assigned again.
    */
   async function pressReceived(shipment: ShipmentRecord) {
     setError(null)
@@ -1294,7 +1342,27 @@ function PickupSection({
         name: viewer.name,
         role: viewer.role,
       })
-      await setLineShipment(saved.invoiceId, saved.lineId, '')
+      // The line carries the destination's name, so the Pickup card can say where the work happened.
+      // A device that cannot reach that invoice here still finishes the receipt below and says so,
+      // rather than stopping half way with the item marked received and its line untouched.
+      let booked = true
+      try {
+        await bookShipmentWork(saved.invoiceId, saved.lineId, {
+          officeName: saved.destinationOfficeName || officeNameOf(saved.destinationOfficeId),
+          approvedAt: saved.workFinishedAt || saved.shippedBackAt || '',
+          approvedBy: saved.workFinishedBy || '',
+          staff: saved.assignees ?? [],
+        })
+      } catch {
+        booked = false
+      }
+      if (booked) await setLineShipment(saved.invoiceId, saved.lineId, '')
+      // PHASE 60, ITEM 5: the names that worked on it are saved in THIS office's list too. A name
+      // already there is skipped and a name that cannot be written never throws, so neither can
+      // hold up the receipt.
+      await Promise.all(
+        (saved.assignees ?? []).map((person) => rememberStaffName(orgId, saved.originOfficeId, person.name)),
+      )
       await writeShippingRecord({
         shipment: saved,
         event: 'Received',
@@ -1308,9 +1376,13 @@ function PickupSection({
         orgId,
         officeId: saved.originOfficeId,
         target: `${saved.invoiceNo} · ${saved.item.itemName}`,
-        detail: `Received back at ${saved.originOfficeName}`,
+        detail: `Received back at ${saved.originOfficeName}; ready to collect, worked on at ${saved.destinationOfficeName}`,
       })
-      setNotice(`${saved.item.itemName} is back at ${saved.originOfficeName}.`)
+      setNotice(
+        booked
+          ? `${saved.item.itemName} is back at ${saved.originOfficeName}. It is waiting in the list below to be collected.`
+          : `${saved.item.itemName} is back at ${saved.originOfficeName}, but its invoice line could not be marked as worked on here. Open the invoice and switch Work approved on, and it appears below.`,
+      )
       setReturns(listShipments(orgId))
       await flushShippingRecords(orgId, viewer.email).catch(() => {})
       onChanged()
@@ -1618,9 +1690,9 @@ function PickupSection({
         <div className={PANEL}>
           <h3 className="text-[14px] font-semibold">Shipped back, waiting to be received</h3>
           <p className={SMALL}>
-            Items this office sent to another sub account and which have been sent back. Press Received once the item
-            is in your hands: who received it and when are recorded, and its line shows in Assigned Invoices at this
-            office again. Work approved is not carried over — switch it on there when the item is ready to collect.
+            Sent back by another sub account. Press Received once the item is in your hands: who
+            received it and when are recorded, and its line becomes ready to collect below, worked on
+            at that sub account by the staff named on it.
           </p>
           <ul className="space-y-2">
             {waitingBack.map((shipment) => (
@@ -1739,6 +1811,13 @@ function PickupSection({
               </div>
               <p className="text-[13px]">{lineNameOf(card.line)}</p>
               <p className={SMALL}>{card.line.description || 'No work written down'}</p>
+              {/* PHASE 60, ITEM 4: the line remembers the other sub account that worked on it, so
+                  the card says where and by whom — the staff it came back with. */}
+              {card.line.workedOnOffice ? (
+                <p className={SMALL}>
+                  Worked on at {card.line.workedOnOffice} by {assigneesLabel(card.line)}.
+                </p>
+              ) : null}
 
               {open ? (
                 <div className="space-y-3 border-t border-line pt-3">

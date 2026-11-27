@@ -179,6 +179,13 @@ export interface InvoiceLine {
    * everything about the journey lives in the shipment, which is the source of truth.
    */
   shipmentId?: string
+  /**
+   * PHASE 60, ITEM 4: the name of the OTHER sub account that worked on this line and sent it back.
+   * Written only when the origin presses "Received": from then on the line carries that name, so
+   * the Pickup card can say "Worked on at [office] by [names].", and the line belongs to Pickup —
+   * it is never shown in Assigned again (see ./worklist).
+   */
+  workedOnOffice?: string
 }
 
 export interface Payment {
@@ -2159,7 +2166,78 @@ export async function setLineShipment(
   return saved
 }
 
-/** PHASE 11, item 6: remember that the note went to the Drive, so "Sent to Drive on …" can show. */
+/**
+ * PHASE 60, ITEM 4 — WHAT "RECEIVED" DOES TO THE LINE ITSELF.
+ *
+ * Until now the Received press only moved the shipment to 'received' and cleared the line's
+ * pointer, so the item came back looking as if nobody had touched it: Work approved off, no staff,
+ * no pick-up — and it fell back into the Assigned Invoices list with "off — this line cannot be
+ * collected yet". This is the one write that fixes that, done in one go so the line can never be
+ * left half-booked:
+ *
+ *   workApproved   on, by the person who approved the work at the destination, at the moment they did
+ *   workedOnOffice the destination's name, so the Pickup card can say where the work happened
+ *   assignedPeople the shipment's own names, so the line carries who worked on it
+ *   pickupStatus   'ready', so the item is waiting to be collected
+ *   shipmentId     cleared, so the item is at home again
+ *
+ * The caller is the Received press in the Pickup list, which marks the shipment received first: the
+ * line is only ever booked for work that a shipment says was done, at the office that says it did it.
+ */
+export async function bookShipmentWork(
+  invoiceId: string,
+  lineId: string,
+  work: {
+    officeName: string
+    approvedAt?: string
+    approvedBy?: string
+    staff: { email?: string; name: string }[]
+  },
+): Promise<Invoice> {
+  const current = readStore()
+  const existing = current.find((invoice) => invoice.id === invoiceId)
+  if (!existing) throw new Error('That invoice is no longer saved.')
+  const line = existing.lines.find((item) => item.id === lineId)
+  if (!line) throw new Error('That line is no longer on the invoice.')
+  const at = nowIso()
+  const office = cleanText(work.officeName, 160)
+  const by = cleanText(work.approvedBy || `Staff at ${office}`, 120)
+  // The shipment's names, tidied: no blanks, no duplicates, emails kept when they were there.
+  const staff: { email?: string; name: string }[] = []
+  for (const person of work.staff) {
+    const name = cleanText(person.name, 120)
+    if (!name) continue
+    if (staff.some((item) => item.name.toLowerCase() === name.toLowerCase())) continue
+    staff.push(person.email ? { email: person.email, name } : { name })
+  }
+  const lines = existing.lines.map((item) =>
+    item.id === lineId
+      ? {
+          ...item,
+          workApproved: true,
+          workApprovedBy: by,
+          workApprovedAt: work.approvedAt || at,
+          workedOnOffice: office || item.workedOnOffice,
+          assignedPeople: staff.length > 0 ? staff : item.assignedPeople,
+          assignedName: staff.length > 0 ? staff[0].name : item.assignedName,
+          assignedTo: staff.length > 0 ? staff[0].email ?? item.assignedTo : item.assignedTo,
+          pickupStatus: 'ready' as PickupStatus,
+          shipmentId: undefined,
+        }
+      : item,
+  )
+  const next = current.map((invoice) =>
+    invoice.id === invoiceId ? { ...invoice, lines, updatedAt: at } : invoice,
+  )
+  await writeStore(next)
+  const saved = next.find((invoice) => invoice.id === invoiceId)
+  if (!saved) throw new Error('That invoice is no longer saved.')
+  return saved
+}
+
+/**
+ * PHASE 11, item 6: remember that the note went to the Drive, so "Sent to Drive on …" can show.
+ */
 export async function markDeliveryNoteSent(
   invoiceIds: string[],
   note: { id: string; fileName: string; sentAt: string; invoices: string[] },

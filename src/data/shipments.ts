@@ -17,7 +17,7 @@
  *   status                            'shipped' | 'work-finished' | 'shipped-back' | 'received'
  *   assignees                         array    the destination's own staff on it
  *   shippedBy / shippedAt             string   who pressed "Shipped to …" and when
- *   workFinishedBy / workFinishedAt   string   who pressed "Work finished" and when
+ *   workFinishedBy / workFinishedAt   string   who pressed "Work approved" and when
  *   shippedBackBy / shippedBackAt     string   who pressed "Shipped back to …" and when
  *   receivedBy / receivedAt           string   who pressed "Received" and when
  *   createdBy, createdAt, updatedAt   string
@@ -56,7 +56,7 @@ export type ShipmentStatus = 'shipped' | 'work-finished' | 'shipped-back' | 'rec
 /** The four words a person reads, in the order the item goes through them. */
 export const SHIPMENT_STATUSES: { id: ShipmentStatus; label: string }[] = [
   { id: 'shipped', label: 'Shipped' },
-  { id: 'work-finished', label: 'Work finished' },
+  { id: 'work-finished', label: 'Work approved' },
   { id: 'shipped-back', label: 'Shipped back' },
   { id: 'received', label: 'Received' },
 ]
@@ -67,7 +67,7 @@ export const SHIPMENT_STATUSES: { id: ShipmentStatus; label: string }[] = [
  * These four words are what a document carries, always lowercase with hyphens:
  *   shipped, work-finished, shipped-back, received
  *
- * A screen may say "Work finished" and "Shipped back", because those are the words a person reads.
+ * A screen may say "Work approved" and "Shipped back", because those are the words a person reads.
  * What is stored is never that: any value that comes back from an older build, another device or a
  * hand edit is turned into the one of the four it means before it is stored again, so the only
  * words this app ever writes are the four above.
@@ -103,6 +103,15 @@ export interface ShipmentItem {
   service: string
   serviceCategory: string
   quantity: number
+  /**
+   * PHASE 60, ITEM 2: the service level the invoice was raised at, and the estimated pick-up date.
+   * The level is the invoice's own word — 'standard' or 'express' — kept exactly as it is stored
+   * there, and the screen says "Standard" or "Express". The date is the invoice's pick-up date, or
+   * empty when the invoice has none. Both are optional so a shipment written by an older build
+   * still reads, and the screens fall back to the invoice they came from.
+   */
+  serviceLevel?: string
+  pickupDate?: string
 }
 
 export interface ShipmentPerson {
@@ -177,7 +186,24 @@ export function itemOfLine(invoice: Invoice, line: InvoiceLine): ShipmentItem {
     service: clean(line.service, 160),
     serviceCategory: clean(line.category, 160),
     quantity: Number.isFinite(line.quantity) ? line.quantity : 0,
+    serviceLevel: invoice.speed === 'express' ? 'express' : 'standard',
+    pickupDate: clean(invoice.pickupDate, 40),
   }
+}
+
+/**
+ * PHASE 60, ITEMS 1 AND 3: the two words the screens print for a shipment's service level and its
+ * estimated pick-up date. A shipment written before these two keys existed has neither, so the
+ * invoice it came from is asked instead; when that is empty too the date is simply "Not set".
+ */
+export function serviceLevelWord(item: ShipmentItem | undefined): string {
+  return item?.serviceLevel === 'express' ? 'Express' : 'Standard'
+}
+
+export function pickupDayWord(item: ShipmentItem | undefined): string {
+  const day = (item?.pickupDate ?? '').trim()
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return ''
+  return day
 }
 
 /* ------------------------------------------------------------------------------ the local copy */
@@ -683,7 +709,8 @@ export async function setShipmentAssignees(
   return saveShipment({ ...record, assignees: assignees.map((person) => ({ ...person })) })
 }
 
-/** PRESS 4 — "Work finished", by the destination, with who and when. */
+/** PRESS 4 — "Work approved", by the destination, with who and when. The stored word stays
+ *  'work-finished': only the label a person reads changed (phase 60, item 3). */
 export async function setWorkFinished(
   shipmentId: string,
   on: boolean,
@@ -706,7 +733,7 @@ export async function shipBack(shipmentId: string, actor: PressActor): Promise<S
   const record = findShipment(shipmentId)
   if (!record) throw new Error('That shipment is no longer here.')
   if (record.status !== 'work-finished') {
-    throw new Error('Turn Work finished on first: it cannot go back before the work is finished.')
+    throw new Error('Turn Work approved on first: it cannot go back before the work is approved.')
   }
   return saveShipment({
     ...record,
