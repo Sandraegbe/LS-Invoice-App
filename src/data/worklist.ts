@@ -300,7 +300,7 @@ export function writePlace(section: PlaceSection, patch: Partial<Place>): Place 
  * An unfinished signature drawing. Kept for the visit rather than for ever: a drawn pad is a
  * picture, and the person only expects it back after a refresh or a step to another screen.
  */
-export function readSign(section: PlaceSection): string {
+export function readSign(section: string): string {
   try {
     return window.sessionStorage.getItem(`${SIGN_PREFIX}${section}`) ?? ''
   } catch {
@@ -308,7 +308,7 @@ export function readSign(section: PlaceSection): string {
   }
 }
 
-export function writeSign(section: PlaceSection, image: string): void {
+export function writeSign(section: string, image: string): void {
   try {
     if (image) window.sessionStorage.setItem(`${SIGN_PREFIX}${section}`, image)
     else window.sessionStorage.removeItem(`${SIGN_PREFIX}${section}`)

@@ -103,6 +103,13 @@ export interface PickupSignature {
    * travels with the signature, so every invoice covered by it keeps the same words.
    */
   feedback?: string
+  /**
+   * PHASE 59, item 3: the day the items were handed over, as YYYY-MM-DD, as the person typed it in
+   * Date collected. It is the pickupDate of the Pickup record; `at` above stays the moment the
+   * collection was saved, so a collection dated last week still says when it was entered.
+   * Optional, so a collection saved before this phase reads exactly as it did.
+   */
+  collectedOn?: string
 }
 
 /**
@@ -1996,6 +2003,12 @@ export interface CollectionInput {
   releasedBy: string
   /** PHASE 21, item 5: optional, typed once, kept with every invoice the signature covers. */
   feedback?: string
+  /**
+   * PHASE 59, item 3: the day the items were handed over, as YYYY-MM-DD, straight from the
+   * Date collected field. Optional, so anything that saved a collection before this phase still
+   * works; the moment of saving is `at`, set here and never taken from the person.
+   */
+  collectedOn?: string
   actor: { email: string; role: 'admin' | 'staff'; permissions?: Record<string, boolean> }
 }
 
@@ -2008,7 +2021,11 @@ export interface CollectionInput {
 export async function savePickupCollection(input: CollectionInput): Promise<{ deliveryNoteId: string; invoiceIds: string[] }> {
   const name = cleanText(input.name, 120)
   if (!name) throw new Error('Type the name of the person collecting.')
-  if (!input.image.startsWith('data:image/')) throw new Error('Draw the signature on the pad first, then save.')
+  // PHASE 59, item 1: a collection may be saved with nothing on the pad — the screen asks first —
+  // so only a picture that is there has to be a picture.
+  if (input.image && !input.image.startsWith('data:image/')) {
+    throw new Error('The signature picture could not be read. Draw it again, or save without it.')
+  }
   const picked = input.invoices.filter((item) => item.lineIds.length > 0)
   if (picked.length === 0) throw new Error('Tick at least one invoice whose items are being collected.')
 
@@ -2040,6 +2057,9 @@ export async function savePickupCollection(input: CollectionInput): Promise<{ de
     releasedBy: cleanText(input.releasedBy, 120),
     deliveryNoteId,
     feedback: cleanText(input.feedback ?? '', 500),
+    // PHASE 59, item 3: the day the person put in Date collected. `at` above stays the moment of
+    // saving, so the collection carries both the day it happened and the day it was written down.
+    collectedOn: cleanText(input.collectedOn ?? '', 10),
   }
 
   const touched = new Set<string>()

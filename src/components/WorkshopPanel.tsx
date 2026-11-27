@@ -21,7 +21,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { MIN_STROKES, SignPad, clearSignStrokes, type SignActions } from './SignPad'
+import { SignPad, clearSignStrokes, type SignActions } from './SignPad'
 import {
   listInvoices,
   savePickupCollection,
@@ -1082,6 +1082,122 @@ function ShippedInSection({
 
 /* ------------------------------------------------------------------------------------- Pickup */
 
+/**
+ * PHASE 59, ITEM 4: ONE FORM, AND ONE DRAFT, PER COLLECTION BEING FILLED IN.
+ *
+ * Everything the New collection screen holds for one collection lives here, so several of them can
+ * be open at once and whatever is typed into one is never touched by another. An entry that has
+ * anything in it is that collection's draft.
+ */
+interface PickupForm {
+  collector: string
+  collectedFor: '' | 'customer' | 'onBehalf'
+  feedback: string
+  /** Other invoices of the same client whose approved items this one signature covers. */
+  extras: Record<string, boolean>
+  /**
+   * PHASE 59, item 3: the day the items were handed over, as YYYY-MM-DD. It starts as today, and
+   * any day may be put in it: nothing on this screen limits it, corrects it or refuses it.
+   */
+  collectedOn: string
+  /** The drawing as it stands right now. The pad keeps the ink, so it is not part of the draft. */
+  drawn: string
+}
+
+/** What one form looks like once written down: the words, and never the picture. */
+type SavedPickupForm = Omit<PickupForm, 'drawn'>
+
+/**
+ * The draft as it is stored on the device. `openId`, `collector`, `collectedFor`, `feedback` and
+ * `extras` are the shape written before collections were kept one per card; they are still read, so
+ * a draft someone had half typed before this change comes back rather than being thrown away.
+ */
+interface SavedPickupForms {
+  forms?: Record<string, SavedPickupForm>
+  openId?: string
+  collector?: string
+  collectedFor?: '' | 'customer' | 'onBehalf'
+  feedback?: string
+  extras?: Record<string, boolean>
+}
+
+/** Today as YYYY-MM-DD in this device's own day — the day the person is having. */
+function todayDay(): string {
+  const date = new Date()
+  const two = (value: number) => String(value).padStart(2, '0')
+  return `${date.getFullYear()}-${two(date.getMonth() + 1)}-${two(date.getDate())}`
+}
+
+/** One collection's drawing is kept under its own key, so no two collections ever share ink. */
+function padKey(key: string): string {
+  return `pickup:${key}`
+}
+
+/** A form as it starts: an empty collection, dated today. */
+function blankForm(): PickupForm {
+  return { collector: '', collectedFor: '', feedback: '', extras: {}, collectedOn: todayDay(), drawn: '' }
+}
+
+/** A choice this build understands, and no other: an unknown value is no choice at all. */
+function choiceOf(value: unknown): '' | 'customer' | 'onBehalf' {
+  return value === 'customer' || value === 'onBehalf' ? value : ''
+}
+
+/** Something typed into it: an untouched form leaves no draft behind when the person walks away. */
+function touched(form: SavedPickupForm): boolean {
+  return (
+    form.collector.trim() !== '' ||
+    form.feedback.trim() !== '' ||
+    form.collectedFor !== '' ||
+    Object.values(form.extras ?? {}).some((on) => on === true)
+  )
+}
+
+/** The forms as they are written down: the words only, because each pad keeps its own picture. */
+function savedOf(list: Record<string, PickupForm>): Record<string, SavedPickupForm> {
+  const out: Record<string, SavedPickupForm> = {}
+  for (const [key, form] of Object.entries(list)) {
+    out[key] = {
+      collector: form.collector,
+      collectedFor: form.collectedFor,
+      feedback: form.feedback,
+      extras: form.extras,
+      collectedOn: form.collectedOn,
+    }
+  }
+  return out
+}
+
+/** The draft, back into forms: every collection on its own key, with the drawing its pad kept. */
+function bringBack(saved: SavedPickupForms): Record<string, PickupForm> {
+  const out: Record<string, PickupForm> = {}
+  for (const [key, form] of Object.entries(saved.forms ?? {})) {
+    out[key] = {
+      collector: form.collector ?? '',
+      collectedFor: choiceOf(form.collectedFor),
+      feedback: form.feedback ?? '',
+      extras: form.extras ?? {},
+      collectedOn: form.collectedOn || todayDay(),
+      drawn: readSign(padKey(key)),
+    }
+  }
+  /* A draft written before this change held one collection rather than a list of them: it comes
+     back as that one collection, on the card it was started from, with the ink the old pad kept. */
+  const oldOne = saved.openId || saved.collector || saved.feedback || ''
+  if (!saved.forms && oldOne !== '') {
+    const key = saved.openId || 'earlier'
+    out[key] = {
+      collector: saved.collector ?? '',
+      collectedFor: choiceOf(saved.collectedFor),
+      feedback: saved.feedback ?? '',
+      extras: saved.extras ?? {},
+      collectedOn: todayDay(),
+      drawn: readSign('pickup'),
+    }
+  }
+  return out
+}
+
 function PickupSection({
   invoices,
   viewer,
@@ -1105,17 +1221,25 @@ function PickupSection({
   const [returnsProblem, setReturnsProblem] = useState<string | null>(null)
   const [returnBusy, setReturnBusy] = useState<string>('')
 
-  /** The card whose form is open, as "<invoice id>:<line id>"; '' when no form is open. */
-  const [openId, setOpenId] = useState('')
-  const [collector, setCollector] = useState('')
-  const [collectedFor, setCollectedFor] = useState<'' | 'customer' | 'onBehalf'>('')
-  const [feedback, setFeedback] = useState('')
-  /** Other invoices of the same client whose approved items this one signature covers. */
-  const [extras, setExtras] = useState<Record<string, boolean>>({})
-  const [strokes, setStrokes] = useState(0)
-  const [drawn, setDrawn] = useState('')
-  /** Clear and Undo last stroke, handed over by the pad so they sit below it, on the left. */
-  const padRef = useRef<SignActions | null>(null)
+  /**
+   * PHASE 59, ITEM 4: every unfinished collection has its own form and its own draft.
+   *
+   * One entry per collection, keyed "<invoice id>:<line id>", so several may be going at once and
+   * typing in one never touches another. An entry that has anything in it is that collection's
+   * draft: it is written to this person's own record by useDraft further down, and it is only ever
+   * removed by Discard draft (after it has asked) or by saving the collection it belongs to.
+   */
+  const [forms, setForms] = useState<Record<string, PickupForm>>({})
+  /** Which of those forms are on screen, keyed the same way. Nothing here is stored on the device. */
+  const [opened, setOpened] = useState<Record<string, boolean>>({})
+  /** The collection being asked "Save without a signature?", by key; '' when nobody is being asked. */
+  const [askSave, setAskSave] = useState('')
+  /** What the last Save collection said, so the answer is always somewhere on the screen. */
+  const [result, setResult] = useState<{ ok: boolean; text: string; key: string } | null>(null)
+  /** The collection being saved right now, so only that card says "Saving…". */
+  const [saving, setSaving] = useState('')
+  /** Clear and Undo last stroke, one per open pad, so each card works on its own drawing. */
+  const pads = useRef<Record<string, SignActions | null>>({})
   /** The person handing the item over is the one signed in, so the form does not ask again. */
   const releasedBy = viewer.name || viewer.email
   /** The sub account this person belongs to: the one an item comes back to. */
@@ -1217,53 +1341,58 @@ function PickupSection({
     return `${card.invoice.id}:${card.line.id}`
   }
 
-  const openCard = cards.find((card) => cardKey(card) === openId) ?? null
-
-  /** The same client's other waiting invoices, so one signature can cover them too. */
-  const sameClient = openCard
-    ? invoices.filter(
-        (invoice) =>
-          invoice.id !== openCard.invoice.id &&
-          (invoice.clientName || 'Client') === (openCard.invoice.clientName || 'Client') &&
-          waitingLines(invoice).filter(atHome).length > 0,
-      )
-    : []
-  const targets = openCard
-    ? [openCard.invoice, ...sameClient.filter((invoice) => extras[invoice.id] === true)]
-    : []
-  const canSave = openCard !== null && collector.trim().length > 0 && collectedFor !== '' && strokes >= MIN_STROKES
+  /** One collection's form, or the blank one it would start from. */
+  function formOf(key: string): PickupForm {
+    return forms[key] ?? blankForm()
+  }
 
   /**
-   * UNFINISHED WORK, KEPT ON THIS DEVICE (phase 28, unchanged): the card a collection was started
-   * from, who is collecting, on whose behalf, the feedback and the other invoices ticked are kept
-   * for this signed-in person alone, never against a sub account. The signature drawing is kept
-   * the same way by the pad itself (SignPad's memoryKey), so it comes back with the rest.
+   * PHASE 59, ITEM 2: the only things Save collection asks for are who is collecting and whether it
+   * is the customer or someone on their behalf. There is no signature minimum and no stroke count,
+   * so nothing else can hold the button off.
    */
-  const pickupDraft = useDraft<{
-    openId: string
-    collector: string
-    collectedFor: '' | 'customer' | 'onBehalf'
-    feedback: string
-    extras: Record<string, boolean>
-  }>({
+  function canSave(form: PickupForm): boolean {
+    return form.collector.trim() !== '' && form.collectedFor !== ''
+  }
+
+  /** The same client's other waiting invoices, so one signature can cover them too. */
+  function sameClientOf(invoice: Invoice): Invoice[] {
+    return invoices.filter(
+      (row) =>
+        row.id !== invoice.id &&
+        (row.clientName || 'Client') === (invoice.clientName || 'Client') &&
+        waitingLines(row).filter(atHome).length > 0,
+    )
+  }
+
+  /**
+   * The unfinished collections that are not on screen at this moment, each waiting on its own card
+   * with its own Edit draft button. One that is open is already its own card, so it is not listed
+   * twice.
+   */
+  const draftRows = Object.keys(forms).filter(
+    (key) =>
+      cards.some((card) => cardKey(card) === key) &&
+      opened[key] !== true &&
+      (touched(forms[key]) || readSign(padKey(key)) !== ''),
+  )
+
+  /**
+   * UNFINISHED WORK, KEPT ON THIS DEVICE (phase 28; phase 59 keeps one per collection): everything
+   * typed into every open form is kept for this signed-in person alone, never against a sub
+   * account, and nothing in this file throws a draft away except the Discard draft button.
+   *
+   * One draft document holds them all, keyed like the forms, so any number of unfinished
+   * collections can wait here at once. The pictures are not in it: each pad keeps its own ink
+   * under its own key, which is what brings a drawing back with the words.
+   */
+  const pickupDraft = useDraft<SavedPickupForms>({
     email: viewer.email,
     form: 'pickup:new',
-    value: { openId, collector, collectedFor, feedback, extras },
+    value: { forms: savedOf(forms) },
     keep: (saved) =>
-      (saved.collector ?? '').trim() !== '' ||
-      (saved.feedback ?? '').trim() !== '' ||
-      (saved.openId ?? '') !== '' ||
-      Object.values(saved.extras ?? {}).some((on) => on === true) ||
-      // A signature drawn and nothing else typed is still unfinished work, and it is kept.
-      readSign('pickup') !== '',
-    restore: (saved) => {
-      setOpenId(saved.openId ?? '')
-      setCollector(saved.collector ?? '')
-      setCollectedFor(saved.collectedFor === 'customer' || saved.collectedFor === 'onBehalf' ? saved.collectedFor : '')
-      setFeedback(saved.feedback ?? '')
-      setExtras(saved.extras ?? {})
-      setDrawn(readSign('pickup'))
-    },
+      Object.entries(saved.forms ?? {}).some(([key, form]) => touched(form) || readSign(padKey(key)) !== ''),
+    restore: (saved) => setForms(bringBack(saved)),
   })
 
   /* PHASE 27 — a saved collection that is due a delivery note. Only one collected on the
@@ -1297,57 +1426,103 @@ function PickupSection({
 
   useEffect(() => subscribeSync(() => setJobs(listJobs())), [])
 
-  /** Throw away what is half typed and drawn: the pad's own memory goes with it. */
-  function clearForm() {
-    writeSign('pickup', '')
-    clearSignStrokes('pickup')
-    setDrawn('')
-    setStrokes(0)
-    setOpenId('')
-    setCollector('')
-    setCollectedFor('')
-    setFeedback('')
-    setExtras({})
+  /**
+   * PHASE 59, ITEM 4: a collection's own drawing is rubbed out only when that collection is saved
+   * or its draft is discarded. Nothing here touches another collection's pad.
+   */
+  function forgetPad(key: string) {
+    writeSign(padKey(key), '')
+    clearSignStrokes(padKey(key))
+    delete pads.current[key]
   }
 
+  /** The only thing that removes a draft, and only from Discard draft, which asks first. */
+  function dropForm(key: string) {
+    forgetPad(key)
+    setForms((previous) => {
+      const next = { ...previous }
+      delete next[key]
+      return next
+    })
+    setOpened((previous) => {
+      const next = { ...previous }
+      delete next[key]
+      return next
+    })
+    setAskSave((previous) => (previous === key ? '' : previous))
+  }
+
+  /**
+   * PHASE 59, ITEM 4: opening a collection's form asks nothing and clears nothing. Whatever other
+   * collections have typed or drawn stays exactly as it is, on its own card, in its own draft.
+   */
   function openForm(card: { invoice: Invoice; line: InvoiceLine }) {
-    const halfDone =
-      openId !== '' &&
-      (collector.trim() !== '' ||
-        feedback.trim() !== '' ||
-        drawn !== '' ||
-        Object.values(extras).some((on) => on === true))
-    // One signature belongs to one collection, so starting another asks first.
-    if (
-      halfDone &&
-      !window.confirm('Another collection is half filled in. Collect this item instead? What you had typed and drawn is thrown away.')
-    ) {
+    const key = cardKey(card)
+    const ink = readSign(padKey(key))
+    setError(null)
+    setNotice(null)
+    setForms((previous) => (previous[key] ? previous : { ...previous, [key]: { ...blankForm(), drawn: ink } }))
+    setOpened((previous) => ({ ...previous, [key]: true }))
+  }
+
+  /** One collection's form, changed, with every other collection left untouched. */
+  function patchForm(key: string, patch: Partial<PickupForm>) {
+    setForms((previous) => ({ ...previous, [key]: { ...(previous[key] ?? blankForm()), ...patch } }))
+  }
+
+  /** The real reason a save did not happen, in the words the person will recognise. */
+  function saveReason(cause: unknown): string {
+    const said = cause instanceof Error ? cause.message : String(cause ?? '')
+    const lower = said.toLowerCase()
+    if (lower.includes('permission') || lower.includes('insufficient')) return 'Not saved: permission denied.'
+    if (lower.includes('offline') || lower.includes('network') || lower.includes('unavailable')) {
+      return 'Not saved: no connection to the server.'
+    }
+    return `Not saved: ${said || 'the app did not say why.'}`
+  }
+
+  /**
+   * PHASE 59, ITEM 1: a pad with nothing on it is a question, not a block. Save collection is
+   * pressed, and the screen asks "Save without a signature?" — nothing is refused for having no ink.
+   */
+  function pressSave(key: string) {
+    if (!formOf(key).drawn) {
+      setAskSave(key)
       return
     }
-    setError(null)
-    setNotice(null)
-    clearForm()
-    setOpenId(cardKey(card))
+    void saveNow(key)
   }
 
-  async function save() {
-    if (!openCard) return
+  /**
+   * PHASE 59, ITEM 2: Save collection always answers. It either saves and says so, or says the real
+   * reason it did not — and everything typed stays exactly where it was.
+   */
+  async function saveNow(key: string) {
+    const card = cards.find((row) => cardKey(row) === key)
+    const form = forms[key]
+    if (!card || !form) return
+    const onBehalf = form.collectedFor === 'onBehalf'
+    const targets = [card.invoice, ...sameClientOf(card.invoice).filter((invoice) => form.extras[invoice.id] === true)]
+    setAskSave('')
     setError(null)
     setNotice(null)
+    setResult(null)
     setBusy(true)
+    setSaving(key)
     try {
-      const result = await savePickupCollection({
+      const answer = await savePickupCollection({
         invoices: targets.map((invoice) => ({
           id: invoice.id,
           lineIds: waitingLines(invoice)
             .filter(atHome)
             .map((line) => line.id),
         })),
-        image: drawn,
-        name: collector.trim(),
-        onBehalfOfClient: collectedFor === 'onBehalf',
+        image: form.drawn,
+        name: form.collector.trim(),
+        onBehalfOfClient: onBehalf,
         releasedBy,
-        feedback: feedback.trim(),
+        feedback: form.feedback.trim(),
+        collectedOn: form.collectedOn,
         actor: { email: viewer.email, role: viewer.role, permissions: viewer.permissions },
       })
       writeAudit({
@@ -1355,32 +1530,37 @@ function PickupSection({
         actorEmail: viewer.email,
         orgId,
         target: targets.map((invoice) => invoice.number).join(', '),
-        detail: `Collected by ${collector.trim()} (${collectedFor === 'onBehalf' ? 'on behalf of customer' : 'customer'}) — delivery note ${result.deliveryNoteId}`,
+        detail: `Collected by ${form.collector.trim()} (${onBehalf ? 'on behalf of customer' : 'customer'}) — delivery note ${answer.deliveryNoteId}`,
       })
       // Item 2: one Pickup record per collected invoice, into the Clients folder, through the
       // sync that was already there. A failure here never undoes the collection itself.
       let recordNote = ''
       try {
-        const records = await queuePickupRecords(result.invoiceIds, orgId, viewer.email)
+        const records = await queuePickupRecords(answer.invoiceIds, orgId, viewer.email)
         recordNote = records.queued.length
           ? ` ${records.queued.length} Pickup record${records.queued.length === 1 ? '' : 's'} queued for the Clients folder.`
           : ''
       } catch {
         recordNote = ' The Pickup record could not be queued; the collection itself is saved.'
       }
-      clearForm()
-      // A draft goes only when the work is saved or deleted, so saving clears it.
-      void pickupDraft.discard()
-      setNotice(
-        `Saved. ${result.invoiceIds.length} invoice${result.invoiceIds.length === 1 ? '' : 's'} marked collected with one signature.${recordNote}${
-          collectedFor === 'onBehalf' ? ' Send the delivery note to Drive from the Delivery notes list.' : ''
+      // This collection is saved, so its own words and its own drawing go, and its card stays open
+      // with the answer on it. No other collection's draft is touched.
+      forgetPad(key)
+      setForms((previous) => ({ ...previous, [key]: blankForm() }))
+      setResult({
+        ok: true,
+        key,
+        text: `Collection saved. ${answer.invoiceIds.length} invoice${answer.invoiceIds.length === 1 ? '' : 's'} marked collected with one signature.${recordNote}${
+          onBehalf ? ' Send the delivery note to Drive from the Delivery notes list.' : ''
         }`,
-      )
+      })
       onChanged()
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'That collection could not be saved.')
+      // Nothing typed is touched: the form stays as it was, and the reason is shown beside it.
+      setResult({ ok: false, key, text: saveReason(cause) })
     } finally {
       setBusy(false)
+      setSaving('')
     }
   }
 
@@ -1475,26 +1655,24 @@ function PickupSection({
         </div>
       ) : null}
 
-      {pickupDraft.waiting ? (
+      {/* PHASE 59, ITEM 4: one draft card per unfinished collection, and every one of them keeps
+          its Edit draft button. Nothing here says anything is lost by leaving, because nothing is:
+          a draft only goes when Discard draft has asked and been answered. */}
+      {draftRows.map((key) => (
         <DraftCard
+          key={key}
           thing="collection"
           compact
           savedAt={pickupDraft.savedAt}
           photosElsewhere={pickupDraft.mediaElsewhere}
-          note=""
-          onDelete={async () => {
-            await pickupDraft.discard()
-            clearForm()
-          }}
-          onContinue={() => void pickupDraft.restoreNow()}
-          onStartNew={async () => {
-            await pickupDraft.discard()
-            clearForm()
-            const first = cards[0]
-            if (first) setOpenId(cardKey(first))
+          note="It is kept exactly as it is: leaving this screen, switching section, refreshing or signing out never changes it or removes it. Only Discard draft removes it."
+          onDelete={async () => dropForm(key)}
+          onContinue={() => {
+            setOpened((previous) => ({ ...previous, [key]: true }))
+            setResult(null)
           }}
         />
-      ) : null}
+      ))}
 
       <div className="grid grid-cols-3 gap-2">
         {PICKUP_STATUSES.map((where) => {
@@ -1548,7 +1726,10 @@ function PickupSection({
       <ul className="space-y-2">
         {cards.map((card) => {
           const key = cardKey(card)
-          const open = key === openId
+          const open = opened[key] === true
+          const form = formOf(key)
+          const ready = canSave(form)
+          const asking = askSave === key
           return (
             <li key={key} className={PANEL}>
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
@@ -1565,11 +1746,11 @@ function PickupSection({
                     <span className="sr-only">Collected by</span>
                     <input
                       type="text"
-                      value={collector}
+                      value={form.collector}
                       maxLength={120}
                       placeholder="Collected by (required)"
                       aria-label="Collected by"
-                      onChange={(event) => setCollector(event.target.value)}
+                      onChange={(event) => patchForm(key, { collector: event.target.value })}
                     />
                   </label>
 
@@ -1578,107 +1759,137 @@ function PickupSection({
                     <label className="admin-check">
                       <input
                         type="radio"
-                        checked={collectedFor === 'customer'}
-                        onChange={() => setCollectedFor('customer')}
-                        name="collected-for"
+                        checked={form.collectedFor === 'customer'}
+                        onChange={() => patchForm(key, { collectedFor: 'customer' })}
+                        name={`collected-for-${key}`}
                       />
                       <span>Customer</span>
                     </label>
                     <label className="admin-check">
                       <input
                         type="radio"
-                        checked={collectedFor === 'onBehalf'}
-                        onChange={() => setCollectedFor('onBehalf')}
-                        name="collected-for"
+                        checked={form.collectedFor === 'onBehalf'}
+                        onChange={() => patchForm(key, { collectedFor: 'onBehalf' })}
+                        name={`collected-for-${key}`}
                       />
                       <span>On behalf of customer</span>
                     </label>
                   </fieldset>
+
+                  {/* PHASE 59, ITEM 3: the day the items were handed over, right after the choice
+                      and before the pad. It starts as today, and any day may be put in it: no
+                      minimum, no maximum, no wording anywhere on this screen limits it. */}
+                  <label className="field">
+                    <span className="admin-legend">Date collected</span>
+                    <input
+                      type="date"
+                      value={form.collectedOn}
+                      aria-label="Date collected"
+                      onChange={(event) => patchForm(key, { collectedOn: event.target.value })}
+                    />
+                  </label>
 
                   <label className="field">
                     <span className="sr-only">Feedback</span>
                     <textarea
                       className="admin-input w-full"
                       rows={2}
-                      value={feedback}
+                      value={form.feedback}
                       maxLength={500}
                       placeholder="Feedback (optional)"
                       aria-label="Feedback"
-                      onChange={(event) => setFeedback(event.target.value)}
+                      onChange={(event) => patchForm(key, { feedback: event.target.value })}
                     />
                   </label>
 
                   <SignPad
-                    value={drawn}
-                    onChange={(image, count) => {
-                      setDrawn(image)
-                      setStrokes(count)
-                    }}
-                    memoryKey="pickup"
+                    value={form.drawn}
+                    onChange={(image) => patchForm(key, { drawn: image })}
+                    memoryKey={padKey(key)}
                     label="Draw the collector's signature here"
                     showButtons={false}
                     onActions={(actions) => {
-                      padRef.current = actions
+                      pads.current[key] = actions
                     }}
                   />
 
                   {/* Under the pad, on the left: the two things that change the drawing, then the
-                      button that keeps it. The pad itself draws no buttons, so these words appear
-                      once. */}
+                      button that saves. There is no stroke count and no minimum anywhere. */}
                   <div className="flex flex-wrap items-center gap-2">
                     <button
                       type="button"
                       className="btn-line admin-small"
-                      disabled={busy}
-                      onClick={() => padRef.current?.clear()}
+                      disabled={saving === key}
+                      onClick={() => pads.current[key]?.clear()}
                     >
                       Clear
                     </button>
                     <button
                       type="button"
                       className="btn-line admin-small"
-                      disabled={busy}
-                      onClick={() => padRef.current?.undo()}
+                      disabled={saving === key}
+                      onClick={() => pads.current[key]?.undo()}
                     >
                       Undo last stroke
                     </button>
-                    <span className={SMALL}>
-                      {strokes === 0
-                        ? 'Sign with a finger, a stylus or the mouse.'
-                        : `${strokes} stroke${strokes === 1 ? '' : 's'}.`}
-                    </span>
-                    <button type="button" className="btn-dark" disabled={!canSave || busy} onClick={() => void save()}>
-                      {busy ? 'Saving…' : 'Save collection'}
+                    <button
+                      type="button"
+                      className="btn-dark"
+                      disabled={!ready || saving === key}
+                      onClick={() => pressSave(key)}
+                    >
+                      {saving === key ? 'Saving…' : 'Save collection'}
                     </button>
                   </div>
 
-                  {!canSave ? (
+                  {!ready ? (
                     <p className={SMALL}>
-                      {!collector.trim()
+                      {!form.collector.trim()
                         ? 'Type who is collecting.'
-                        : collectedFor === ''
-                          ? 'Choose Customer or On behalf of customer.'
-                          : `Draw the signature: ${MIN_STROKES - strokes} more stroke${MIN_STROKES - strokes === 1 ? '' : 's'}.`}
+                        : 'Choose Customer or On behalf of customer.'}
                     </p>
                   ) : null}
 
-                  {sameClient.length > 0 ? (
+                  {/* Item 1: an empty pad is a question with two answers, never a block. */}
+                  {asking ? (
+                    <div className="rounded-md border border-line bg-white p-2">
+                      <p className="text-[13px] font-semibold">Save without a signature?</p>
+                      <p className={SMALL}>Nobody has signed the pad. The collection is saved as it stands.</p>
+                      <div className="mt-2 flex flex-wrap items-center gap-2">
+                        <button type="button" className="btn-dark" onClick={() => void saveNow(key)}>
+                          Yes, save
+                        </button>
+                        <button type="button" className="btn-line admin-small" onClick={() => setAskSave('')}>
+                          Go back
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {/* Item 2: the answer to Save collection, in the card it was pressed on. */}
+                  {result && result.key === key ? (
+                    <p className={result.ok ? 'text-[13px] text-ink-soft' : 'form-error'}>{result.text}</p>
+                  ) : null}
+
+                  {sameClientOf(card.invoice).length > 0 ? (
                     <div className="space-y-1 border-t border-line pt-3">
                       <p className="text-[13px] font-semibold">Add other approved items of this client</p>
                       <p className={SMALL}>
                         One signature covers every invoice ticked here as well as the item on this card.
                       </p>
                       <ul className="space-y-1">
-                        {sameClient.map((invoice) => {
+                        {sameClientOf(card.invoice).map((invoice) => {
                           const count = waitingLines(invoice).length
                           return (
                             <li key={invoice.id}>
                               <label className="admin-check">
                                 <input
                                   type="checkbox"
-                                  checked={extras[invoice.id] === true}
+                                  checked={form.extras[invoice.id] === true}
                                   onChange={(event) =>
-                                    setExtras({ ...extras, [invoice.id]: event.target.checked })
+                                    patchForm(key, {
+                                      extras: { ...form.extras, [invoice.id]: event.target.checked },
+                                    })
                                   }
                                 />
                                 <span>

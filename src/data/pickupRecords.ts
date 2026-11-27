@@ -87,14 +87,17 @@ function uniqueName(taken: Set<string>, base: string): string {
  */
 export function pickupRecordOf(invoice: Invoice, createdAt = new Date().toISOString()): PickupRecord | null {
   const signature = invoice.pickupSignature
-  if (!signature || !signature.image) return null
+  // PHASE 59, item 1: a collection may be saved with nothing on the pad, and it is still a
+  // collection — the record never holds the picture anyway, so only the collection has to exist.
+  if (!signature) return null
   return {
     invoiceNo: invoice.number,
     clientName: invoice.clientName || 'Client',
     recordType: 'Pickup',
-    // The day the items were collected. The invoice's own pick-up day stands in only when the
-    // signature does not say when it happened.
-    pickupDate: dmy(signature.at) || dayWord(invoice.pickupDate),
+    // PHASE 59, item 3: the day the person put in Date collected, which is the pickupDate of this
+    // record. The moment of saving, then the invoice's own pick-up day, stand in only when the
+    // collection does not say which day it was.
+    pickupDate: dayWord(signature.collectedOn ?? '') || dmy(signature.at) || dayWord(invoice.pickupDate),
     collectedAt: signature.at,
     collectedBy: clean(signature.name, 120),
     collectedFor: signature.onBehalfOfClient ? 'On behalf of customer' : 'Customer',

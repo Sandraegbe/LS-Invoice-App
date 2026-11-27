@@ -21,7 +21,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
-import { readSign, writeSign, type PlaceSection } from '../data/worklist'
+import { readSign, writeSign } from '../data/worklist'
 
 export interface SignStroke {
   /** Points as a share of the pad's box, 0..1, so a turned phone keeps the same drawing. */
@@ -34,12 +34,10 @@ const OUT_H = 200
 const MAX_BYTES = 30 * 1024
 /** The pen: about 2.5 px at the size the picture is kept. */
 const PEN = 2.5
-/** How many strokes make a signature rather than a tap. */
-export const MIN_STROKES = 3
 
 const STROKES_KEY = 'ls-invoice.sign-strokes'
 
-function readStrokes(memoryKey: PlaceSection): SignStroke[] {
+function readStrokes(memoryKey: string): SignStroke[] {
   try {
     const raw = window.sessionStorage.getItem(`${STROKES_KEY}:${memoryKey}`)
     if (!raw) return []
@@ -64,7 +62,7 @@ function readStrokes(memoryKey: PlaceSection): SignStroke[] {
   }
 }
 
-function writeStrokes(memoryKey: PlaceSection, strokes: SignStroke[]): void {
+function writeStrokes(memoryKey: string, strokes: SignStroke[]): void {
   try {
     if (strokes.length === 0) window.sessionStorage.removeItem(`${STROKES_KEY}:${memoryKey}`)
     else window.sessionStorage.setItem(`${STROKES_KEY}:${memoryKey}`, JSON.stringify(strokes))
@@ -74,7 +72,7 @@ function writeStrokes(memoryKey: PlaceSection, strokes: SignStroke[]): void {
 }
 
 /** Rub out the unfinished drawing kept for the visit, once the collection it belonged to is saved. */
-export function clearSignStrokes(memoryKey: PlaceSection): void {
+export function clearSignStrokes(memoryKey: string): void {
   try {
     window.sessionStorage.removeItem(`${STROKES_KEY}:${memoryKey}`)
   } catch {
@@ -161,7 +159,7 @@ interface Props {
   value: string
   onChange: (image: string, strokes: number) => void
   /** Where the unfinished drawing is kept for the visit. */
-  memoryKey: PlaceSection
+  memoryKey: string
   label: string
   disabled?: boolean
   /**
@@ -233,8 +231,8 @@ export function SignPad({
     strokes.current = kept
     const saved = value || readSign(memoryKey)
     base.current = kept.length === 0 ? saved : ''
-    // An older drawing that is only a picture still counts as signed, so Save is not blocked.
-    const initial = kept.length > 0 ? kept.length : base.current ? MIN_STROKES : 0
+    // An older drawing that is only a picture still counts as signed: any ink at all is enough.
+    const initial = kept.length > 0 ? kept.length : base.current ? 1 : 0
     setCount(initial)
     layout()
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -277,7 +275,8 @@ export function SignPad({
     if (!image) image = ''
     writeStrokes(memoryKey, strokes.current)
     writeSign(memoryKey, image)
-    const total = strokes.current.length || (base.current ? MIN_STROKES : 0)
+    // No minimum and no counting: the number is only how many strokes made the picture.
+    const total = strokes.current.length || (base.current ? 1 : 0)
     setCount(total)
     onChange(image, total)
   }
@@ -371,8 +370,10 @@ export function SignPad({
           <button type="button" className="btn-line admin-small" onClick={undo} disabled={disabled}>
             Undo last stroke
           </button>
+          {/* PHASE 59, ITEM 1: no stroke count and no "one more stroke" wording — a single tap
+              is as much a signature as a long hand. */}
           <span className="text-[12px] leading-5 text-muted">
-            {count === 0 ? 'Sign with a finger, a stylus or the mouse.' : `${count} stroke${count === 1 ? '' : 's'}.`}
+            {count === 0 ? 'Sign with a finger, a stylus or the mouse.' : ''}
           </span>
         </div>
       ) : null}
