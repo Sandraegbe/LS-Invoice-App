@@ -15,6 +15,8 @@ import {
   type Client,
 } from '../data/clients'
 import { listInvoices, useInvoicesVersion, type Invoice } from '../data/invoices'
+import { lookupSheetClients, type SheetClient } from '../data/clientLookup'
+import { clientsWebhookConfigured } from '../lib/env'
 import { can } from '../data/users'
 import { ALL_OFFICES, NO_SUB_ACCOUNT, officeOfRecord, selectedOffice } from '../data/offices'
 import type { SignedInUser } from '../data/auth'
@@ -50,6 +52,11 @@ export function ClientsPanel({ user, onOpenInvoice }: ClientsPanelProps) {
   /** 'loading' until the clients collection has answered once, so the list is never a guess. */
   const [reading, setReading] = useState(true)
   const [readError, setReadError] = useState<string | null>(null)
+  /** The Google Sheet lookup (read only): its answer, and where the ask has got to. */
+  const [sheet, setSheet] = useState<SheetClient[]>([])
+  const [sheetState, setSheetState] = useState<'idle' | 'loading' | 'error'>('idle')
+  const [sheetError, setSheetError] = useState<string | null>(null)
+  const sheetOn = clientsWebhookConfigured()
   const mayDecideDemurrage = can(user, 'manageDemurrage')
   // Two clients are the same only when their numbers are identical once cleaned.
   const clashOnPhone = phone.trim() ? findClientByPhone(phone) : null
@@ -117,6 +124,44 @@ export function ClientsPanel({ user, onOpenInvoice }: ClientsPanelProps) {
         client.email.toLowerCase().includes(needle),
     )
   }, [clients, query])
+
+  /**
+   * THE GOOGLE SHEET LOOKUP (read only, search only). While the n8n webhook is set up and the
+   * person is searching, the sheet is asked for matching rows after a short pause in typing; every
+   * new keystroke cancels the ask that came before it. Nothing here writes to the sheet or makes a
+   * client: it only shows what the sheet already holds, beside the clients saved in the app.
+   */
+  useEffect(() => {
+    const needle = query.trim()
+    if (!needle || !sheetOn) {
+      setSheet([])
+      setSheetState('idle')
+      setSheetError(null)
+      return
+    }
+    let live = true
+    const stop = new AbortController()
+    const timer = setTimeout(() => {
+      setSheetState('loading')
+      void lookupSheetClients(needle, stop.signal).then((answer) => {
+        if (!live) return
+        if (answer.ok) {
+          setSheet(answer.clients)
+          setSheetState('idle')
+          setSheetError(null)
+        } else {
+          setSheet([])
+          setSheetState('error')
+          setSheetError(answer.error)
+        }
+      })
+    }, 350)
+    return () => {
+      live = false
+      clearTimeout(timer)
+      stop.abort()
+    }
+  }, [query, sheetOn])
 
   /**
    * PHASE 31, ITEM 2 — every client's invoices, read from the invoices collection. The screen reads
@@ -255,6 +300,34 @@ export function ClientsPanel({ user, onOpenInvoice }: ClientsPanelProps) {
           onChange={(event) => setQuery(event.target.value)}
         />
       </label>
+
+      {/* The Google Sheet lookup: the rows the sheet already holds, never a new client. */}
+      {sheetOn && query.trim() !== '' ? (
+        <div className="app-card">
+          <div className="flex items-baseline justify-between gap-2">
+            <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted">From the Google Sheet</p>
+            {sheetState === 'loading' ? <span className="text-[11px] text-muted">Searching…</span> : null}
+          </div>
+          {sheetState === 'error' ? (
+            <p className="mt-1 text-[12px] leading-4 text-body">{sheetError}</p>
+          ) : sheet.length === 0 ? (
+            <p className="mt-1 text-[12px] leading-4 text-muted">
+              {sheetState === 'loading' ? 'Looking…' : 'No row in the sheet matches that.'}
+            </p>
+          ) : (
+            <ul className="mt-3 flex flex-col gap-3">
+              {sheet.map((row, index) => (
+                <li
+                  key={`${row.phone || row.email || row.name}-${index}`}
+                  className={index === 0 ? '' : 'border-t border-line pt-3'}
+                >
+                  <SheetResult row={row} />
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      ) : null}
 
       {error ? (
         <p className="rounded-[6px] border border-gold-deep bg-gold-wash px-3 py-2 text-[13px] leading-5 text-ink">{error}</p>
@@ -670,4 +743,62 @@ function EditClientForm({
       </div>
     </form>
   )
+}
+
+/**
+ * ONE ROW OF THE GOOGLE SHEET, shown as a small profile (read only). Only the details the row
+ * actually carries are printed, so an empty column is simply absent — the same rule the client
+ * cards follow. The money columns hold plain Naira numbers in the sheet (e.g. 20000), so they are
+ * shown as ₦20,000.
+ */
+function SheetResult({ row }: { row: SheetClient }) {
+  const details = (
+    [
+      ['Phone', row.phone],
+      ['Email', row.email],
+      ['Address', row.address],
+      ['Location', row.location],
+      ['Gender', row.gender],
+      ['Social', row.socialHandle],
+      ['Heard about us', row.heardAbout],
+      ['Customer type', row.customerType],
+      ['Touches', row.touches],
+      ['Total spent', row.totalSpent ? sheetMoney(row.totalSpent) : ''],
+      ['Outstanding', row.outstanding ? sheetMoney(row.outstanding) : ''],
+      ['Frequent services', row.frequentServices],
+      ['First touch', row.firstTouch],
+      ['Last touch', row.lastTouch],
+      ['Days since last touch', row.daysSince],
+      ['Notes', row.notes],
+    ] as Array<[string, string]>
+  ).filter(([, value]) => value !== '')
+
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex flex-wrap items-baseline gap-x-2">
+        <span className="text-[14px] font-semibold text-ink">{row.name || '—'}</span>
+        {row.customerStatus ? (
+          <span className="rounded-full border border-line px-2 py-[1px] text-[10px] uppercase tracking-[0.08em] text-muted">
+            {row.customerStatus}
+          </span>
+        ) : null}
+      </div>
+      <dl className="grid gap-1 text-[12.5px] leading-5 text-body sm:grid-cols-2">
+        {details.map(([label, value]) => (
+          <div key={label} className="flex gap-2">
+            <dt className="w-[118px] shrink-0 text-muted">{label}</dt>
+            <dd className="break-words">{value}</dd>
+          </div>
+        ))}
+      </dl>
+    </div>
+  )
+}
+
+/** A money column from the sheet, shown as Naira: the sheet keeps plain numbers, e.g. 20000. */
+function sheetMoney(value: string): string {
+  const digits = value.replace(/[^0-9.-]/g, '')
+  const number = Number(digits)
+  if (digits === '' || !Number.isFinite(number)) return value
+  return `₦${number.toLocaleString('en-NG')}`
 }

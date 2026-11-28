@@ -58,6 +58,20 @@ export function driveWorkerConfigured(): boolean {
 }
 
 /**
+ * The client lookup webhook: an n8n workflow (Webhook node → Google Sheets) that reads the
+ * business's own Google Sheet and answers with the rows that match what was typed. It is a public
+ * web value like the others — the sheet itself is never opened by the browser, only the webhook's
+ * answer is read, and nothing is ever written back. Found in n8n → the workflow → the Webhook node
+ * → its "Production URL" (the plain /webhook/… one, not the /webhook-test/… one).
+ */
+export const clientsWebhookUrl: string = value('VITE_CLIENTS_WEBHOOK_URL').replace(/\/+$/, '')
+
+/** True once the webhook's address is filled in; until then the sheet lookup is simply absent. */
+export function clientsWebhookConfigured(): boolean {
+  return clientsWebhookUrl !== ''
+}
+
+/**
  * The app's own public address: the person's live Firebase Hosting site. It is written here so the
  * app can name it in a message even when the page was opened from somewhere else (a downloaded
  * copy on a file:// page, for instance, which Google refuses to answer at all).
