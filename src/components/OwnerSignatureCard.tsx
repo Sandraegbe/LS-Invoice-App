@@ -25,6 +25,7 @@ import {
   deleteOwnerSignature,
   findInvoice,
   saveOwnerSignature,
+  setPaidStamp,
   useInvoicesVersion,
   type OwnerSignature,
 } from '../data/invoices'
@@ -305,8 +306,49 @@ export const OwnerSignatureCard = forwardRef<OwnerSignatureHandle, Props>(functi
     flush: () => (count > 0 ? savePad() : Promise.resolve(false)),
   }))
 
+  /**
+   * THE PAID STAMP TOGGLE (this task, item 5): the owner and admins put the stamp on the invoice or
+   * take it off, at any time — before a signature, after one, with a payment recorded or with none.
+   * One tap, straight away: no confirmation, no amount, no pop-up. The database keeps it as
+   * `paidStamp { by, email, at }`, and off removes it; the stamp itself shows on the invoice, the
+   * PDF and the client's copy, read only, for everybody.
+   */
+  async function flipStamp() {
+    if (busy) return
+    const before = findInvoice(invoiceId)
+    if (!before) return
+    setBusy(true)
+    setError(null)
+    setNote(null)
+    try {
+      const result = await setPaidStamp(invoiceId, !before.stampOn, '', {
+        email: user.email,
+        role: user.role,
+        permissions: user.permissions as unknown as Record<string, boolean>,
+      })
+      setNote(result.invoice.stampOn ? 'Paid stamp on.' : 'Paid stamp off.')
+      // ITEM 7: the stamp can be the last of the three things a client's copy needs, so it runs the
+      // same trigger a payment and a signature run — the files go to the invoice's own office.
+      await afterSignatureChange(before, result.invoice, { email: user.email, name: user.name })
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'The paid stamp could not be changed.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /**
+   * ITEM 3: the footer is for owners and admins only. The role is read from the person's own
+   * `users/{uid}` document, live, which is what `user` is — so an admin switched into an office
+   * still sees it, and an office user never does, with no empty space left behind. Their saved
+   * signature and stamp still print for them, read only.
+   */
+  if (user.role !== 'admin') return null
+
   /** Nothing signed and nothing drawn: the pad, with Undo, Clear and Save signature beside it. */
   const showPad = drawing || !signed
+  /** Whether the invoice carries the PAID stamp right now, read live from the invoice store. */
+  const stamped = Boolean(invoiced?.stampOn)
 
   return (
     <section className="app-card">
@@ -396,6 +438,25 @@ export const OwnerSignatureCard = forwardRef<OwnerSignatureHandle, Props>(functi
           </div>
         </div>
       )}
+
+      {/*
+        ITEM 5: the Paid stamp toggle. Its own row, directly below the row of signature buttons,
+        as wide as the pad, one small gap above. The label says what a tap will do, and the
+        switched-on state is gold so it can be read at a glance. Owners and admins only (the whole
+        footer is theirs), in All offices, in No office yet and inside any office alike, and it
+        works before a signature, after one, before a payment or after it.
+      */}
+      <div className="mt-3 w-full">
+        <button
+          type="button"
+          className={stamped ? 'owner-stamp-toggle owner-stamp-toggle--on' : 'owner-stamp-toggle'}
+          aria-pressed={stamped}
+          onClick={() => void flipStamp()}
+          disabled={busy}
+        >
+          {stamped ? 'Turn off Paid stamp' : 'Turn on Paid stamp'}
+        </button>
+      </div>
 
       {note ? <p className="mt-2 text-[12px] leading-5 text-gold-deep">{note}</p> : null}
       {error ? (

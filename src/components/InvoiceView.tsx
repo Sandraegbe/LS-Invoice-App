@@ -11,7 +11,6 @@ import { writeAudit } from '../data/audit'
 import { recordPaymentOnInvoice, afterSignatureChange } from '../data/handoff'
 import { subscribeSync } from '../data/sync'
 import {
-  awaitsPaymentConfirmation,
   changePickupDate,
   EXTRA_EXPRESS,
   findInvoice,
@@ -21,7 +20,6 @@ import {
   mayCreateInvoices,
   mayEdit,
   mayManagePayments,
-  PENDING_LABEL,
   sendBlockers,
   deleteInvoice,
   setExpressFee,
@@ -829,14 +827,6 @@ export function InvoiceView({ id, user, onBack, onDeleted, onEdit }: InvoiceView
           </ul>
         )}
 
-        {/* THIS TASK, ITEM 6: signed and nothing paid yet — the label it carries until the office
-            records the payment, on the invoice and in every list of invoices. */}
-        {awaitsPaymentConfirmation(invoice) ? (
-          <p className="mt-2 inline-flex items-center rounded-full border border-gold-deep bg-gold-wash px-2 py-[1px] text-[11.5px] font-semibold text-gold-deep">
-            {PENDING_LABEL}
-          </p>
-        ) : null}
-
         {invoice.status === 'paid' ? (
           <p className="mt-2 text-[13px] font-semibold text-gold-deep">
             Paid in full on {formatDateDDMMYYYY(invoice.paidStampAt ?? invoice.updatedAt)}.
@@ -952,24 +942,24 @@ export function InvoiceView({ id, user, onBack, onDeleted, onEdit }: InvoiceView
 
       <PhotosBox invoiceNo={invoice.number} tick={syncTick} />
 
-      {/* THE SIGNATURE AREA, at the very bottom of the sheet and on its right-hand side, the way a
-          real invoice is signed: the saved signature picture above the signatory's name, then the
-          Authorized Signatory block, the word Signature, then the stamp underneath — never over the
-          words, the totals or a photo, because the space the turned stamp needs is reserved below
-          before it is drawn. Item 3 of phase 49: the picture is on a paid invoice only. */}
+      {/* THE SIGNATURE AREA (item 4), at the bottom of the sheet: the caption "Authorised
+          Signatory" and the saved drawing on ONE line, the drawing immediately after the caption,
+          never above it and never below it. It is a fixed row of its own, so editing lines, totals
+          or anything else above it cannot move the signature off that line. The stamp sits in the
+          reserved space underneath, for everybody, read only. */}
       <div className="inv-sign-block">
-        <div className="inv-sign-line">
+        <div className="inv-sign-row">
+          <span className="inv-sign-label">Authorised Signatory:</span>
           {signatureImage ? (
             <img
               className="inv-sign-image"
               src={signatureImage}
-              alt={signatoryName ? `Signature of ${signatoryName}` : 'Authorized signature'}
+              alt={signatoryName ? `Signature of ${signatoryName}` : 'Authorised signature'}
             />
-          ) : null}
-          {signatoryName ? <p className="inv-sign-name">{signatoryName}</p> : null}
-          <p className="inv-sign-label">Authorized Signatory</p>
-          <span className="inv-sign-rule" aria-hidden="true" />
-          <p className="inv-sign-word">Signature</p>
+          ) : (
+            <span className="inv-sign-blank" aria-hidden="true" />
+          )}
+          {signatoryName ? <span className="inv-sign-name">{signatoryName}</span> : null}
         </div>
         <div className="inv-sign-stamp-space">
           {stamp ? (

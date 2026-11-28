@@ -594,14 +594,6 @@ export async function buildInvoicePdf(input: PdfInput): Promise<Blob> {
   // Where the words below start: the new material takes the top of the reserved space, so the word
   // Signature and the stamp keep their own places underneath it.
   let blockTop = y
-  if (signaturePicture) {
-    const scale = Math.min(STAMP_BOX_WIDTH / signaturePicture.width, signPictureHeight / signaturePicture.height)
-    const drawWidth = signaturePicture.width * scale
-    const drawHeight = signaturePicture.height * scale
-    blockTop -= drawHeight
-    writer.place(signaturePicture, blockRight - drawWidth, blockTop, drawWidth, drawHeight)
-    blockTop -= 4
-  }
   if (signatoryName) {
     // Cut to the block's own width, so it can never crowd the rule or the stamp below.
     let shown = signatoryName
@@ -609,7 +601,20 @@ export async function buildInvoicePdf(input: PdfInput): Promise<Blob> {
     blockTop -= 10
     writer.text(blockLeft, blockTop, 9, shown, true, 0.2)
   }
-  writer.text(blockLeft, blockTop, 8, 'Authorized Signatory', true, 0.45)
+  // ITEM 4: the caption, then the saved drawing on the SAME line, immediately after the words —
+  // "Authorised Signatory: [signature]" — never above the caption and never below it. The picture is
+  // fitted to the room the caption leaves and keeps its own proportions, so an edit above it can
+  // never move it off that line.
+  const signCaption = 'Authorised Signatory:'
+  writer.text(blockLeft, blockTop, 8, signCaption, true, 0.25)
+  if (signaturePicture) {
+    const captionWidth = widthOf(signCaption, 8, true)
+    const room = STAMP_BOX_WIDTH - captionWidth - 6
+    const scale = Math.min(room / signaturePicture.width, signPictureHeight / signaturePicture.height)
+    const drawWidth = signaturePicture.width * scale
+    const drawHeight = signaturePicture.height * scale
+    writer.place(signaturePicture, blockLeft + captionWidth + 6, blockTop - Math.min(MM(3), drawHeight / 2), drawWidth, drawHeight)
+  }
   writer.rule(blockLeft, blockTop - 5, STAMP_BOX_WIDTH)
   writer.text(blockLeft, blockTop - 20, 9, 'Signature', true, 0.2)
   // THE SIGNATURE TEXT — the collector's name as it was typed, never the drawing. It sits on the
@@ -626,7 +631,10 @@ export async function buildInvoicePdf(input: PdfInput): Promise<Blob> {
   // Four millimetres of clear paper between the word and the top of the stamp's own footprint.
   // The stamp is drawn only while the invoice's Paid switch is on: on an unpaid one the reserved
   // box simply stays empty paper.
-  if (input.stampOn ?? input.totals.paidKobo > 0) writer.stamp(blockLeft, blockTop - 20 - STAMP_CLEAR)
+  // ITEM 5: the stamp is drawn only while the invoice's own Paid stamp is on — the owner's or an
+  // admin's switch, and nothing else. Money arriving never turns it on by itself, and everybody
+  // sees it, read only. An invoice with no stamp simply leaves the reserved box as clear paper.
+  if (input.stampOn) writer.stamp(blockLeft, blockTop - 20 - STAMP_CLEAR)
 
   flush()
   return buildDocument(writer, pages)

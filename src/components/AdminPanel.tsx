@@ -576,10 +576,10 @@ export function AdminPanel({ user }: AdminPanelProps) {
                   >
                     Remove
                   </button>
-                  {/* THIS TASK, ITEM 3: Hide, on an invite that is no longer live only. A pending
-                      invite has Revoke first and no Hide, so nobody hides a person who is about to
-                      sign in. */}
-                  {row.kind === 'invite' && row.status !== 'pending' ? (
+                  {/* ITEM 8: Hide sits on EVERY invite row, a pending one included — hiding is not
+                      revoking, so nothing about the person's access changes and they can be brought
+                      back with a new invite. There is no "hide all" and nothing is ever deleted. */}
+                  {row.kind === 'invite' ? (
                     <button
                       type="button"
                       className="btn-line admin-small"

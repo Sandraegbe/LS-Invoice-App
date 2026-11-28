@@ -782,6 +782,19 @@ service cloud.firestore {
         && get(/databases/$(database)/documents/offices/$(myOffice())).data.get('sections', {}).get('drive', true) == true));
     }
 
+    // each office's waiting-to-sync list: its own office, and owners and admins
+    match /syncQueues/{officeId} {
+      allow read, create, update, delete: if signedIn() && !isDisabled()
+        && get(/databases/$(database)/documents/offices/$(officeId)).data.orgId == currentUser().orgId
+        && (isAdminHere() || (officeId == myOffice() && officeId != ''));
+
+      match /{document=**} {
+        allow read, create, update, delete: if signedIn() && !isDisabled()
+          && get(/databases/$(database)/documents/offices/$(officeId)).data.orgId == currentUser().orgId
+          && (isAdminHere() || (officeId == myOffice() && officeId != ''));
+      }
+    }
+
     // names-only list of sub accounts, so shipping can offer a destination
     match /officeDirectory/{officeId} {
       allow read: if signedIn() && sameOrg(resource.data.orgId);

@@ -4,13 +4,11 @@ import { InvoiceCard } from './InvoiceCard'
 import { useInvoicesVersion } from '../data/invoices'
 import { formatNaira } from '../lib/format'
 import { dropDraft, listDrafts, useDraft, useScrollMemory, type WaitingDraft } from '../lib/drafts'
-import { loadInvoices, invoicesLoading, searchInvoices, awaitsPaymentConfirmation, PENDING_LABEL, type Invoice, type InvoiceFilter } from '../data/invoices'
+import { loadInvoices, invoicesLoading, searchInvoices, type Invoice, type InvoiceFilter } from '../data/invoices'
 import { NO_SUB_ACCOUNT, ALL_OFFICES, officeOfRecord, selectedOffice } from '../data/offices'
 
 const FILTERS: { id: InvoiceFilter; label: string }[] = [
   { id: 'all', label: 'All' },
-  /* THIS TASK, ITEM 6: the filter the owner asked for — signed invoices with nothing paid yet. */
-  { id: 'pending-confirmation', label: 'Pending payment confirmation' },
   { id: 'unpaid', label: 'Not paid' },
   { id: 'part-paid', label: 'Part paid' },
   { id: 'paid', label: 'Paid' },
@@ -280,13 +278,6 @@ export function InvoiceList({ orgId, user, onOpen, onCreate, onEditDraft }: Invo
                     {invoice.lines.length === 1 ? '' : 's'}
                   </span>
                   <span>
-                    {/* THIS TASK, ITEM 6: the label every list carries while an invoice is signed
-                        and nothing has been paid against it. */}
-                    {awaitsPaymentConfirmation(invoice) ? (
-                      <span className="mr-2 rounded-full border border-gold-deep bg-gold-wash px-2 py-[1px] text-gold-deep">
-                        {PENDING_LABEL}
-                      </span>
-                    ) : null}
                     {markingNone && officeOfRecord(invoice.officeId || invoice.office?.officeId) === '' ? (
                       <span className="mr-2 rounded-full border border-line px-2 py-[1px]">{NO_SUB_ACCOUNT}</span>
                     ) : null}

@@ -582,9 +582,19 @@ export async function connectSharedDrive(orgId: string, officeId = ''): Promise<
  * Disconnect ONE office: the Worker lets go of the account, and this office's record is blanked so
  * every open device reads Not connected at once. Files already in the Drive stay exactly where they
  * are, and the record itself is kept — never deleted.
+ *
+ * ITEM 14: the Worker is told WHICH office is letting go — that office's id travels in the request
+ * body, so it knows the exact account to disconnect and no other. The All offices and No office yet
+ * cards carry no office, so their body carries no officeId and nothing office-specific is touched.
  */
 export async function disconnectSharedDrive(officeId = ''): Promise<void> {
-  const response = await callWorker('/subaccounts/disconnect', { method: 'POST' })
+  const id = officeId.trim()
+  const response = await callWorker('/subaccounts/disconnect', {
+    method: 'POST',
+    ...(id
+      ? { body: JSON.stringify({ officeId: id }), headers: { 'content-type': 'application/json' } }
+      : {}),
+  })
   if (!response.ok) throw await workerProblem(response, 'The key keeper did not let go of the connection.')
   await forgetSharedConnection(officeId)
 }

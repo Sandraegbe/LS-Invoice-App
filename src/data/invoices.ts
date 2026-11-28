@@ -340,11 +340,18 @@ export interface Invoice {
    */
   officeId: string
   payments: Payment[]
+  /**
+   * THE PAID STAMP, as the database keeps it (item 5): a small map of who put it on and when.
+   * Present means the stamp shows on the invoice, for everyone, read only; absent (null) means no
+   * stamp. It is the only paid-stamp field written to Firestore, because that is the one the
+   * database's rules allow — and the owner writes it with their own email in it.
+   */
+  paidStamp: { by: string; email: string; at: string } | null
+  /** Read from paidStamp: when the stamp went on, or null. Never written on its own. */
   paidStampAt: string | null
   /**
-   * The Paid toggle as the person left it, and the only thing that shows the stamp. A payment
-   * on the invoice does not show it by itself: somebody has to switch the toggle on, which
-   * needs a confirmed payment, and switching it off needs a reason. Payments stay either way.
+   * Read from paidStamp: whether the stamp shows. A payment recorded on the invoice never puts
+   * it on by itself — only the owner's or an admin's toggle does (items 5 and 7).
    */
   stampOn: boolean
   /** When the person confirmed the payment on the Confirm Payment form; null until then. */
@@ -671,6 +678,13 @@ export function reasonOf(error: unknown): string {
   return message.trim() || 'the database refused it'
 }
 
+/**
+ * The fields that are READ from `paidStamp` and therefore never sent to the database: sending them
+ * would break the one write the database's rules allow for the stamp (item 5), because a change to
+ * them counts as a change to the invoice.
+ */
+const DERIVED_STAMP_FIELDS = new Set(['stampOn', 'paidStampAt'])
+
 /** The language the database is written in: no undefined, because Firestore rejects it. */
 function toDoc(value: unknown): Record<string, unknown> {
   if (Array.isArray(value)) return (value.map((item) => (item === undefined ? null : toDoc(item))) as unknown) as Record<string, unknown>
@@ -678,6 +692,7 @@ function toDoc(value: unknown): Record<string, unknown> {
     const out: Record<string, unknown> = {}
     for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
       if (item === undefined) continue
+      if (DERIVED_STAMP_FIELDS.has(key)) continue
       out[key] = toDoc(item)
     }
     return out
@@ -906,10 +921,30 @@ function withOffice(invoice: Invoice): Invoice {
     pickupDate: typeof invoice.pickupDate === 'string' ? invoice.pickupDate : '',
     pickupHistory: Array.isArray(invoice.pickupHistory) ? invoice.pickupHistory : [],
     driveError: invoice.driveError ?? '',
-    // An invoice saved before the stamp became a switch of its own reads as switched on when
-    // its stamp time is there, so nothing that was already stamped loses its stamp.
-    stampOn: typeof invoice.stampOn === 'boolean' ? invoice.stampOn : Boolean(invoice.paidStampAt),
+    // ITEM 5: the stamp is one map in Firestore — who put it on, their email, and when. An invoice
+    // written before this reads as stamped when its old stamp time or switch is there, so nothing
+    // that was already stamped loses its stamp. stampOn and paidStampAt are then derived from it
+    // and never written, so a write can only ever change paidStamp.
+    paidStamp: paidStampOf(invoice),
+    paidStampAt: paidStampOf(invoice)?.at ?? null,
+    stampOn: Boolean(paidStampOf(invoice)),
   }
+}
+
+/**
+ * ITEM 5: the stamp a stored invoice carries, in the one shape the database's rules allow. A row
+ * written by an older build keeps its stamp through the switch or the time it saved.
+ */
+function paidStampOf(invoice: Partial<Invoice> & { stampOn?: boolean; paidStampAt?: string | null }): Invoice['paidStamp'] {
+  const kept = invoice.paidStamp
+  if (kept && typeof kept === 'object' && kept.at) {
+    return { by: String(kept.by || ''), email: String(kept.email || ''), at: String(kept.at) }
+  }
+  const at = typeof invoice.paidStampAt === 'string' ? invoice.paidStampAt : ''
+  if (invoice.stampOn === true || at) {
+    return { by: '', email: '', at: at || String(invoice.updatedAt || '') }
+  }
+  return null
 }
 
 /* --------------------------------------- item 5: the browser's own invoices */
@@ -1066,16 +1101,14 @@ export function findInvoice(id: string): Invoice | null {
   return readStore().find((invoice) => invoice.id === id) ?? null
 }
 
-export type InvoiceFilter = 'all' | InvoiceStatus | 'unsent' | 'pending-confirmation'
+export type InvoiceFilter = 'all' | InvoiceStatus | 'unsent'
 
 /** The search box and the filter row above the invoice list. */
 export function searchInvoices(query: string, filter: InvoiceFilter, orgId = 'local'): Invoice[] {
   const needle = query.trim().toLowerCase()
   return listInvoices(orgId).filter((invoice) => {
     if (filter === 'unsent' && invoice.sentAt) return false
-    // THIS TASK, ITEM 6: the All invoices filter — signed, and nothing paid against it yet.
-    if (filter === 'pending-confirmation' && !awaitsPaymentConfirmation(invoice)) return false
-    if (filter !== 'all' && filter !== 'unsent' && filter !== 'pending-confirmation' && invoice.status !== filter) {
+    if (filter !== 'all' && filter !== 'unsent' && invoice.status !== filter) {
       return false
     }
     if (!needle) return true
@@ -1238,6 +1271,7 @@ export async function createInvoice(
     office,
     officeId: office.officeId || '',
     payments: [],
+    paidStamp: null,
     paidStampAt: null,
     stampOn: false,
     paymentConfirmedAt: null,
@@ -1619,10 +1653,9 @@ export async function confirmPayment(
     paidKobo,
     balanceKobo: balanceFor(existing.totalKobo, paidKobo),
     status,
-    paidStampAt: status === 'paid' ? at : existing.paidStampAt,
-    // A payment recorded from the card is the person switching the Paid toggle on, so the
-    // stamp goes on with it once nothing is owed.
-    stampOn: status === 'paid' ? true : Boolean(existing.stampOn) || Boolean(existing.paidStampAt),
+    // ITEM 1: money can come in at any time, and it never touches the owner's stamp — the
+    // database allows a payment to be added and nothing else about the stamp to move, so the stamp
+    // stays exactly as the owner left it (item 5 owns it).
     paymentConfirmedAt: at,
     updatedAt: at,
     // Phase 7: rules 5 and 6, from the answers the payment form asked for.
@@ -1673,11 +1706,11 @@ export async function withdrawPaidStamp(
 }
 
 /**
- * THE PAID TOGGLE ON A SAVED INVOICE (this task, item 5): the owner and admins switch it on or off
- * at any time — before a signature, after one, with a payment recorded or with none at all.
- * Nothing is asked for: no amount and no confirmation about money, because the stamp alone is what
- * this changes. Every payment stays exactly where it is, since turning the stamp off takes the
- * stamp off and not the money.
+ * THE PAID STAMP TOGGLE (this task, item 5): the owner and admins turn it on or off at any time —
+ * before a signature, after one, with a payment recorded or with none at all. One write, of the
+ * one field the database's rules allow for it: `paidStamp { by, email, at }` goes on, and `null`
+ * takes it off. Nothing else about the invoice moves, so no payment is touched and no amount or
+ * reason is asked for anywhere.
  */
 export async function setPaidStamp(
   id: string,
@@ -1688,29 +1721,21 @@ export async function setPaidStamp(
   const current = readStore()
   const existing = current.find((invoice) => invoice.id === id)
   if (!existing) throw new Error('That invoice is no longer saved.')
-  if (!mayManagePayments(actor)) {
-    throw new Error('The Paid toggle needs the manage payments permission, or an admin.')
+  if (actor.role !== 'admin') {
+    throw new Error('Only the owner or an admin can change the Paid stamp.')
   }
   const at = nowIso()
+  const now = { by: actor.email, email: actor.email, at }
   if (on) {
-    if (existing.stampOn) return { invoice: existing, reason: '' }
-    const saved: Invoice = {
-      ...existing,
-      stampOn: true,
-      paidStampAt: existing.paidStampAt ?? at,
-      updatedAt: at,
-      // Phase 7, rule 5: switching the stamp on is also the invoice being closed, so the
-      // demurrage clock stops and keeps what it reached.
-      ...demurrageAfterPayment(existing, undefined, actor.email, at, statusFor(existing.totalKobo, existing.paidKobo)),
-    }
+    if (existing.paidStamp) return { invoice: existing, reason }
+    const saved: Invoice = { ...existing, paidStamp: now, paidStampAt: at, stampOn: true, updatedAt: at }
     await writeStore(current.map((invoice) => (invoice.id === id ? saved : invoice)))
-    return { invoice: saved, reason: '' }
+    return { invoice: saved, reason }
   }
-  const why = cleanText(reason, 200) || 'Switched off by hand.'
-  if (!existing.stampOn) return { invoice: existing, reason: why }
-  const saved: Invoice = { ...existing, stampOn: false, paidStampAt: null, updatedAt: at }
+  if (!existing.paidStamp) return { invoice: existing, reason }
+  const saved: Invoice = { ...existing, paidStamp: null, paidStampAt: null, stampOn: false, updatedAt: at }
   await writeStore(current.map((invoice) => (invoice.id === id ? saved : invoice)))
-  return { invoice: saved, reason: why }
+  return { invoice: saved, reason }
 }
 
 /**
@@ -1835,12 +1860,6 @@ export function sendBlockers(invoice: Invoice): string[] {
 }
 
 /**
- * THE LABEL OF A SIGNED INVOICE WITH NOTHING PAID YET (item 6): on the invoice itself and in every
- * list of invoices, until the office records the payment, when it leaves by itself.
- */
-export const PENDING_LABEL = 'Pending payment confirmation'
-
-/**
  * The longest drawing that may be saved: 250 kB of characters. The database's own rules allow
  * 300000, so this leaves room and the refusal comes from here, in plain words, before a round trip.
  */
@@ -1855,14 +1874,6 @@ export function isOwnerSigned(invoice: Invoice): boolean {
 /** Is at least one payment recorded on this invoice? */
 export function hasRecordedPayment(invoice: Invoice): boolean {
   return Array.isArray(invoice.payments) && invoice.payments.length > 0
-}
-
-/**
- * Signed, and nothing paid yet: the state item 6 calls "Pending payment confirmation". The office
- * records the payment exactly as it does today, and the label leaves with it.
- */
-export function awaitsPaymentConfirmation(invoice: Invoice): boolean {
-  return isOwnerSigned(invoice) && !hasRecordedPayment(invoice)
 }
 
 /** Only the owner and admins sign: the database refuses anybody else, so the screen does too. */
@@ -2314,8 +2325,6 @@ export async function addPayment(
     paidKobo,
     balanceKobo: balanceFor(existing.totalKobo, paidKobo),
     status,
-    paidStampAt: status === 'paid' ? at : existing.paidStampAt,
-    stampOn: status === 'paid' ? true : Boolean(existing.stampOn) || Boolean(existing.paidStampAt),
     updatedAt: at,
   }
   await writeStore(current.map((invoice) => (invoice.id === id ? saved : invoice)))
