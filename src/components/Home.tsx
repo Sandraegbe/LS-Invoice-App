@@ -36,12 +36,32 @@ interface HomeProps {
 
 export function Home({ mode, onSignedIn, onNavigate, note }: HomeProps) {
   const [notice, setNotice] = useState<NoticeKind | null>(null)
+  /** Once the sign-in card is closed with its X, the bar keeps its own Sign in, from the very top. */
+  const [cardClosed, setCardClosed] = useState(false)
+
+  /** The bar's Sign in, while the card is closed: bring the card back and return to the top. */
+  const revealCard = () => {
+    setCardClosed(false)
+    window.scrollTo({ top: 0 })
+  }
 
   return (
     <>
-      <Header route={mode === 'login' ? '/login' : mode === 'register' ? '/register' : '/forgot'} onNavigate={onNavigate} />
+      <Header
+        route={mode === 'login' ? '/login' : mode === 'register' ? '/register' : '/forgot'}
+        onNavigate={onNavigate}
+        showLogin={cardClosed}
+        onLogin={cardClosed ? revealCard : undefined}
+      />
       <main>
-        <Hero mode={mode} onSignedIn={onSignedIn} onNavigate={onNavigate} note={note} />
+        <Hero
+          mode={mode}
+          onSignedIn={onSignedIn}
+          onNavigate={onNavigate}
+          note={note}
+          closed={cardClosed}
+          onClose={() => setCardClosed(true)}
+        />
       </main>
       <Features />
       <Footer onNotice={setNotice} />

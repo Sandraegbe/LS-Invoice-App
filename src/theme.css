@@ -478,6 +478,21 @@
     background: var(--color-blue-bright);
   }
 
+  /* The bar's own Sign in: hidden at the very top (the hero card is the way in there), fading in
+     as soon as the page is scrolled. `visibility` keeps it out of the tab order while it is gone. */
+  .header-login {
+    opacity: 0;
+    visibility: hidden;
+    transform: translateY(-4px);
+    transition: opacity 160ms ease, transform 160ms ease, visibility 160ms ease;
+  }
+
+  .header-login[data-show='true'] {
+    opacity: 1;
+    visibility: visible;
+    transform: none;
+  }
+
   .btn-burger {
     width: 40px;
     height: 40px;
@@ -614,11 +629,13 @@
     align-items: center;
     gap: 24px;
     padding-inline: 12px;
+    transition: column-gap 340ms ease;
   }
 
   .hero-left {
     flex: 1 1 100%;
     min-width: 0;
+    transition: flex-grow 340ms ease, flex-basis 340ms ease, max-width 340ms ease;
   }
 
   .hero-right {
@@ -626,6 +643,8 @@
     min-width: 0;
     display: flex;
     justify-content: center;
+    transition: flex-grow 340ms ease, flex-basis 340ms ease, max-width 340ms ease, opacity 340ms ease,
+      transform 340ms ease, visibility 0s;
   }
 
   /* round 43: the opening band's height is now the section's fixed 613 and the words no longer decide
@@ -665,6 +684,33 @@
     .hero-right {
       flex: 0 0 var(--container-card);
     }
+  }
+
+  /* Card closed: its column folds away and the words and picture slide across to take the middle of
+     the band, then slide back when Sign in in the bar brings the card back. */
+  .hero-section[data-card='closed'] .hero-row {
+    justify-content: center;
+    column-gap: 0;
+  }
+
+  .hero-section[data-card='closed'] .hero-left {
+    flex-grow: 0;
+    flex-basis: 760px;
+    max-width: 760px;
+  }
+
+  .hero-section[data-card='closed'] .hero-right {
+    flex-grow: 0;
+    flex-basis: 0;
+    max-width: 0;
+    opacity: 0;
+    transform: translateX(24px);
+    overflow: hidden;
+    pointer-events: none;
+    /* hold it on screen for the length of the slide, then drop it out of the tab order */
+    visibility: hidden;
+    transition: flex-grow 340ms ease, flex-basis 340ms ease, max-width 340ms ease, opacity 340ms ease,
+      transform 340ms ease, visibility 0s linear 340ms;
   }
 
   .hero-title {
@@ -708,6 +754,40 @@
   .hero-card {
     width: 100%;
     max-width: var(--container-card);
+    /* round 44: the card now reads as floating above the band rather than sitting flat in it — it
+       rises a little and carries its own two-layer shadow. The rise is a transform, so it costs no
+       layout height and the reference's fixed band heights are untouched. */
+    position: relative;
+    z-index: 2;
+    transform: translateY(-10px);
+    /* min-width 0 lets the card shrink all the way down as its column folds away on close. */
+    min-width: 0;
+  }
+
+  .hero-card .auth-card {
+    box-shadow: 0 30px 60px rgba(21, 28, 38, 0.22), 0 8px 18px rgba(21, 28, 38, 0.12);
+    min-width: 0;
+  }
+
+  /* The X on the sign-in card: closing it hides the card and the bar keeps its own Sign in. */
+  .hero-card__close {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    z-index: 3;
+    width: 32px;
+    height: 32px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    color: var(--color-paper);
+    background: rgba(255, 255, 255, 0.18);
+    transition: background 160ms ease;
+  }
+
+  .hero-card__close:hover {
+    background: rgba(255, 255, 255, 0.34);
   }
 
   /* ---------- the picture slider: one picture, an arrow either side, three dots ---------- */

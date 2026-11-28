@@ -7,6 +7,10 @@ import type { Route } from '../lib/router'
 interface HeaderProps {
   route: Route
   onNavigate: (route: Route) => void
+  /** True once the hero card has been closed, so the bar keeps its own Sign in from the very top. */
+  showLogin?: boolean
+  /** What Sign in does when the card was closed: bring it back. Unset means "go to /login". */
+  onLogin?: () => void
 }
 
 const LINKS: { label: string; href: string }[] = [
@@ -34,7 +38,7 @@ const PHONE_LINKS: { label: string; href: string }[] = [
  * The chip and the menu's install line are plain links to the app's own download file
  * (`lib/download.ts`), so clicking saves the whole app as one file — no dialog to read first.
  */
-export function Header({ route, onNavigate }: HeaderProps) {
+export function Header({ route, onNavigate, showLogin = false, onLogin }: HeaderProps) {
   const [stuck, setStuck] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
   const wide = useWide()
@@ -78,6 +82,21 @@ export function Header({ route, onNavigate }: HeaderProps) {
       </div>
 
       <div className="header-end">
+        {/* The way in from the bar itself. It stays hidden while the hero's own card is on show,
+            and fades in once the page is scrolled or that card was closed with its X. */}
+        <a
+          href="#/login"
+          className="btn-login-top header-login"
+          data-show={stuck || showLogin ? 'true' : 'false'}
+          onClick={(event) => {
+            event.preventDefault()
+            if (onLogin) onLogin()
+            else onNavigate('/login')
+          }}
+        >
+          Sign in
+        </a>
+
         <button
           type="button"
           className="btn-burger"
